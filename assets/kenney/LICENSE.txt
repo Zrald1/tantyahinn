@@ -1,0 +1,22 @@
+Kenney asset packs — CC0 1.0 Universal (public domain)
+Author: Kenney (www.kenney.nl)
+
+Bundles used in this directory:
+- Furniture Kit   https://kenney.nl/assets/furniture-kit
+- Car Kit         https://kenney.nl/assets/car-kit
+- 3D Nature Pack  https://kenney.nl/assets/nature-pack
+- Prototype Kit   https://kenney.nl/assets/prototype-kit
+- Blocky Characters https://kenney.nl/assets/blocky-characters
+
+All models are dedicated to the public domain under CC0 1.0 — they may
+be copied, modified and used commercially without attribution (credit
+appreciated, not required).
+
+Files prefixed by their kit (carSedan, person, stairs, columnSq,
+columnRd, door, doorDbl, window) were baked from texture-mapped OBJs
+by tool/bake_kenney.py so per-face colors live in the .mtl — the app
+reads no texture maps.
+- KayKit Furniture Bits (kk_* files) — Kay Lousberg, CC0 1.0
+  https://github.com/KayKit-Game-Assets/KayKit-Furniture-Bits-1.0
+  Texture atlas colors baked per-face by tool/bake_kenney.py into the
+  .mtl files so the app reads no texture maps.

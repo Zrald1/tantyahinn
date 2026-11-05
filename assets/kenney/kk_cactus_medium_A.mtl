@@ -1,0 +1,68 @@
+newmtl bake0
+Kd 0.3412 0.6784 0.2784
+newmtl bake1
+Kd 0.3020 0.6588 0.2824
+newmtl bake2
+Kd 0.2039 0.6196 0.3020
+newmtl bake3
+Kd 0.5647 0.7725 0.2392
+newmtl bake4
+Kd 0.4510 0.7255 0.2588
+newmtl bake5
+Kd 0.8000 0.8353 0.8471
+newmtl bake6
+Kd 0.1804 0.6078 0.3059
+newmtl bake7
+Kd 0.2706 0.6471 0.2902
+newmtl bake8
+Kd 0.3333 0.6706 0.2784
+newmtl bake9
+Kd 0.6196 0.7961 0.2275
+newmtl bake10
+Kd 0.8353 0.8627 0.8745
+newmtl bake11
+Kd 0.8549 0.8784 0.8902
+newmtl bake12
+Kd 0.7765 0.8118 0.8275
+newmtl bake13
+Kd 0.7451 0.7882 0.8078
+newmtl bake14
+Kd 0.7373 0.7804 0.8000
+newmtl bake15
+Kd 0.7725 0.4000 0.1961
+newmtl bake16
+Kd 0.7922 0.4118 0.2000
+newmtl bake17
+Kd 0.6863 0.3333 0.1765
+newmtl bake18
+Kd 0.6353 0.2941 0.1686
+newmtl bake19
+Kd 0.5961 0.2667 0.1569
+newmtl bake20
+Kd 0.6549 0.3098 0.1725
+newmtl bake21
+Kd 0.6039 0.2706 0.1608
+newmtl bake22
+Kd 0.5647 0.2392 0.1529
+newmtl bake23
+Kd 0.5765 0.2510 0.1529
+newmtl bake24
+Kd 0.5373 0.2196 0.1451
+newmtl bake25
+Kd 0.6941 0.3412 0.1804
+newmtl bake26
+Kd 0.6078 0.2745 0.1608
+newmtl bake27
+Kd 0.5608 0.2392 0.1490
+newmtl bake28
+Kd 0.5686 0.2431 0.1529
+newmtl bake29
+Kd 0.8627 0.4431 0.2039
+newmtl bake30
+Kd 0.8863 0.4549 0.2078
+newmtl bake31
+Kd 0.7961 0.4118 0.2000
+newmtl bake32
+Kd 0.7569 0.3922 0.1961
+newmtl bake33
+Kd 0.7451 0.3804 0.1922

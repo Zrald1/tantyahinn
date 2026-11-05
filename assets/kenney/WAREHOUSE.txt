@@ -1,0 +1,12 @@
+3D WAREHOUSE MODELS (downloaded via public glTF binaries)
+=========================================================
+
+wh_door_glass.obj  - "glass door" by 3D Warehouse contributor
+  source: https://3dwarehouse.sketchup.com/model/45386889-1d59-4e5e-93d1-59aab3f0d267
+wh_door_wood.obj   - "wooden door" by Rachael C.
+  source: https://3dwarehouse.sketchup.com/model/d03f7ba0-cecd-4d3a-9dc6-af3c743d49a4
+
+Downloaded 2026-11-01 via the public /content/public glTF binary of
+the 3D Warehouse entity API; converted to OBJ with Blender 5.1
+(glass door decimated 75% for viewport perf). Per the SketchUp 3D
+Warehouse license these models may be used inside projects.

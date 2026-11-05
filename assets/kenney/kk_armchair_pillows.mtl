@@ -1,0 +1,108 @@
+newmtl bake0
+Kd 0.8353 0.8627 0.8745
+newmtl bake1
+Kd 0.7490 0.7882 0.8078
+newmtl bake2
+Kd 0.8118 0.8431 0.8549
+newmtl bake3
+Kd 0.7490 0.7922 0.8078
+newmtl bake4
+Kd 0.9059 0.9216 0.9294
+newmtl bake5
+Kd 0.8196 0.8510 0.8627
+newmtl bake6
+Kd 0.8235 0.8549 0.8667
+newmtl bake7
+Kd 0.7569 0.7961 0.8157
+newmtl bake8
+Kd 0.7725 0.8118 0.8275
+newmtl bake9
+Kd 0.8941 0.9137 0.9216
+newmtl bake10
+Kd 0.7529 0.7922 0.8118
+newmtl bake11
+Kd 0.8275 0.8549 0.8667
+newmtl bake12
+Kd 0.7608 0.8000 0.8157
+newmtl bake13
+Kd 0.8039 0.8353 0.8510
+newmtl bake14
+Kd 0.8196 0.8471 0.8627
+newmtl bake15
+Kd 0.8392 0.8667 0.8784
+newmtl bake16
+Kd 0.8627 0.8863 0.8941
+newmtl bake17
+Kd 0.8314 0.8588 0.8706
+newmtl bake18
+Kd 0.7961 0.8314 0.8431
+newmtl bake19
+Kd 0.8078 0.8392 0.8549
+newmtl bake20
+Kd 0.8000 0.8353 0.8471
+newmtl bake21
+Kd 0.7961 0.8275 0.8431
+newmtl bake22
+Kd 0.8275 0.8588 0.8706
+newmtl bake23
+Kd 0.8431 0.8667 0.8784
+newmtl bake24
+Kd 0.8745 0.8941 0.9020
+newmtl bake25
+Kd 0.9529 0.9608 0.9647
+newmtl bake26
+Kd 0.9412 0.9490 0.9569
+newmtl bake27
+Kd 0.8078 0.8392 0.8510
+newmtl bake28
+Kd 0.7294 0.7725 0.7922
+newmtl bake29
+Kd 0.8000 0.8314 0.8471
+newmtl bake30
+Kd 0.8941 0.9098 0.9176
+newmtl bake31
+Kd 0.7373 0.7804 0.8000
+newmtl bake32
+Kd 0.7255 0.7725 0.7922
+newmtl bake33
+Kd 0.7412 0.7843 0.8000
+newmtl bake34
+Kd 0.7333 0.7765 0.7961
+newmtl bake35
+Kd 0.7451 0.7882 0.8039
+newmtl bake36
+Kd 0.7451 0.7843 0.8039
+newmtl bake37
+Kd 0.8745 0.8980 0.9059
+newmtl bake38
+Kd 0.8784 0.8980 0.9059
+newmtl bake39
+Kd 0.8902 0.9059 0.9137
+newmtl bake40
+Kd 0.8824 0.9020 0.9098
+newmtl bake41
+Kd 0.7922 0.8275 0.8392
+newmtl bake42
+Kd 0.7922 0.8275 0.8431
+newmtl bake43
+Kd 0.7412 0.7843 0.8039
+newmtl bake44
+Kd 0.8784 0.8980 0.9098
+newmtl bake45
+Kd 0.7255 0.7725 0.7882
+newmtl bake46
+Kd 0.0784 0.1020 0.1098
+newmtl bake47
+Kd 0.0980 0.1294 0.1373
+newmtl bake48
+Kd 0.0667 0.0902 0.0941
+newmtl bake49
+Kd 0.0471 0.0627 0.0667
+newmtl bake50
+Kd 0.0980 0.1294 0.1412
+newmtl bake51
+Kd 0.0471 0.0588 0.0627
+newmtl bake52
+Kd 0.1020 0.1373 0.1490
+newmtl bake53
+Kd 0.0549 0.0706 0.0784
