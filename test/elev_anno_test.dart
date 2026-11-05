@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:tantyahin/dxf.dart';
 import 'package:tantyahin/model3d.dart';
 import 'package:tantyahin/models.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -28,6 +29,35 @@ void main() {
     expect(t[2], 'D2');
   });
 
+  test('elevation sheets dimension every hosted opening (W×H strings)',
+      () {
+    final m = Model3d(name: 'dims')
+      ..walls.add(Wall3d(points: [0, 0, 6, 0], thickness: .15))
+      ..blocks.add(Block3d(def: 'window-slide', x: 3, y: 0));
+    final dxf = buildModelSheet(m, SheetView.front);
+    final sc = DxfParser.parse(dxf);
+    // width "1.80" (horizontal) + height "1.20" (rotated 90) + tag +
+    // SILL must all land in the emitted sheet text
+    final texts = sc.texts.map((t) => t.text).toList();
+    expect(texts.where((t) => t == '1.80'), hasLength(1));
+    expect(
+      sc.texts.where((t) => t.text == '1.20' && t.rotation != 0),
+      hasLength(1),
+      reason: 'height dim must draw rotated on the vertical string',
+    );
+    expect(texts.any((t) => t.startsWith('SILL')), isTrue);
+    // extension + dim lines exist as prims: a vertical dim line off
+    // the opening's side and a horizontal one under the sill — each
+    // with the 45-degree tick pairs (short diagonal prims)
+    final vertical = sc.prims
+        .where((p) =>
+            p.pts.length == 2 &&
+            (p.pts[0].dx - p.pts[1].dx).abs() < 0.01 &&
+            (p.pts[0].dy - p.pts[1].dy).abs() > 0.5)
+        .length;
+    expect(vertical, greaterThanOrEqualTo(1));
+  });
+
   test('hostedOpenings: front wall openings face front, not left', () {
     final m = house();
     final front = hostedOpenings(m, SheetView.front);
@@ -45,7 +75,10 @@ void main() {
     expect(dxf, contains('D1'));
     expect(dxf, contains('W1'));
     expect(dxf, contains('SILL')); // window sill height callout
-    expect(dxf, contains('×'));
+    // W×H moved onto dimension strings: horizontal width text +
+    // a rotated (code-50) height text
+    expect(dxf, contains('1.80'));
+    expect(dxf, contains('50\n90'));
     final plan = buildModelSheet(m, SheetView.plan, project: ProjectInfo());
     expect(plan, contains('D1 · Door 0.90'));
     expect(plan, contains('W1 · Sliding window'));

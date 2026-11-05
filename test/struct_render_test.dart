@@ -13,19 +13,20 @@ void main() {
 
     m.blocks.first.footing = true;
     final withFoot = modelFaces(m);
-    // buried pad (4 sides + top) + pedestal stem (4 sides + top) = 10
-    expect(withFoot.length - base, 10);
-    // the pad bottom sits at the 0.60m default embedment below base
+    // buried pad = 4 sides + top = 5 faces; the Table 305-1 lone-column
+    // default (0.30 m) equals the pad thickness -> no pedestal stem
+    expect(withFoot.length - base, 5);
+    // the pad bottom sits at the 1-floor embedment below base
     final fZ = withFoot
         .skip(base)
         .expand((f) => f.v)
         .map((p) => p[2]);
-    expect(fZ.reduce((a, b) => a < b ? a : b), closeTo(-0.60, 1e-9));
+    expect(fZ.reduce((a, b) => a < b ? a : b), closeTo(-0.30, 1e-9));
     expect(fZ.reduce((a, b) => a > b ? a : b), closeTo(0, 1e-9));
-    // the pad+stem are inside blockFaces -> the 3D ray pick and the
+    // the pad faces are inside blockFaces -> the 3D ray pick and the
     // render both see the footing as part of the column (selectable)
     final bf = blockFaces(m.blocks.first, cadBlock('col-sq')!);
-    expect(bf.where((f) => f.v.every((p) => p[2] < 0)).length,
+    expect(bf.where((f) => f.v.every((p) => p[2] <= 0)).length,
         greaterThanOrEqualTo(5));
     final top = withFoot
         .expand((f) => f.v)

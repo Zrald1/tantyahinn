@@ -117,6 +117,47 @@ void main() {
     expect(priv.signatories, hasLength(1));
   });
 
+  test('retired names blank under EVERY template — no seat injection',
+      () {
+    // a custom-template project file still carrying an office name
+    // gets it blanked on load (the name can never export) WITHOUT
+    // pulling the four deped seats into a non-deped sign-off
+    final p = ProjectInfo.fromJson({
+      'signatories': [
+        {
+          'label': 'Approved by',
+          'name': '  norma  b. samantela, ceso v ',
+          'position': 'SDS',
+        },
+        {
+          'label': 'Prepared by',
+          'name': 'JUAN DELA CRUZ',
+          'position': 'Engr.',
+        },
+      ],
+      'template': 'tpl-9',
+    });
+    expect(p.signatories, hasLength(2));
+    expect(p.signatories[0].name, isEmpty); // retired name scrubbed
+    expect(p.signatories[0].position, 'SDS'); // title stays
+    expect(p.signatories[1].name, 'JUAN DELA CRUZ'); // user name kept
+    // same for a persisted CUSTOM template: scrub only, no deped seats
+    final tpl = DocTemplate.fromJson({
+      'id': 'tpl-77',
+      'name': 'My office',
+      'signatories': [
+        {
+          'label': 'Checked & Reviewed by',
+          'name': 'PEDRO J. PELONIO',
+          'position': 'SGOD Chief',
+        },
+      ],
+    });
+    expect(tpl.signatories, hasLength(1));
+    expect(tpl.signatories[0].name, isEmpty);
+    expect(tpl.signatories[0].position, 'SGOD Chief');
+  });
+
   test('private template: no header/logo but signs with the engineer', () {
     final p = ProjectInfo();
     privateTpl().applyTo(p);

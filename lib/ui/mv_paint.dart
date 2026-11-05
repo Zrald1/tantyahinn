@@ -874,17 +874,34 @@ class _PlanPainter extends CustomPainter {
     // will snap them onto a wall, theme color when free-standing
     if (st._tool == _MTool.block) {
       final m = st._sel;
-      final seat = m == null
-          ? null
-          : (isTrussDef(st._blkDef.id)
-                ? seatTrussOnWalls(m, snapW, st._blkRot, st._blkDef.w)
-                : seatOnWall(m, st._blkDef, snapW));
+      // unified seat tuple — $4 = truss bearing (0 for openings/perches)
+      (Offset, double, double, double)? seat;
+      if (m != null) {
+        if (isTrussDef(st._blkDef.id)) {
+          seat = seatTrussOnWalls(m, snapW, st._blkRot, st._blkDef.w);
+        } else if (isBeamDef(st._blkDef.id)) {
+          final sb = seatBeamOnWall(
+            m,
+            snapW,
+            st._blkRot,
+            st._blkDef.w,
+          );
+          if (sb != null) seat = (sb.$1, sb.$2, sb.$3, 0.0);
+        } else {
+          final so = seatOnWall(m, st._blkDef, snapW);
+          if (so != null) seat = (so.$1, so.$2, so.$3, 0.0);
+        }
+      }
       final seatC = const Color(0xFF16A34A);
       final ghost = Block3d(
         def: st._blkDef.id,
         x: seat?.$1.dx ?? snapW.dx,
         y: seat?.$1.dy ?? snapW.dy,
         rot: seat?.$2 ?? st._blkRot,
+        // out-to-out: preview the span the bearing pair will fit
+        sx: seat != null && seat.$4 > 0
+            ? trussFitSx(1.0, st._blkDef.w, seat.$4)
+            : 1.0,
       );
       final pen = Paint()
         ..style = PaintingStyle.stroke
@@ -923,17 +940,30 @@ class _PlanPainter extends CustomPainter {
       final mdef = cadBlock(mv.def);
       if (mdef != null) {
         final m = st._sel;
-        final seat = m == null
-            ? null
-            : (isTrussDef(mdef.id)
-                  ? seatTrussOnWalls(
-                      m,
-                      snapW,
-                      mv.rot,
-                      mdef.w * mv.sx * mv.scale,
-                      ignore: mv,
-                    )
-                  : seatOnWall(m, mdef, snapW));
+        // unified seat tuple — $4 = truss bearing (0 for openings)
+        (Offset, double, double, double)? seat;
+        if (m != null) {
+          if (isTrussDef(mdef.id)) {
+            seat = seatTrussOnWalls(
+              m,
+              snapW,
+              mv.rot,
+              mdef.w * mv.sx * mv.scale,
+              ignore: mv,
+            );
+          } else if (isBeamDef(mdef.id)) {
+            final sb = seatBeamOnWall(
+              m,
+              snapW,
+              mv.rot,
+              mdef.w * mv.sx * mv.scale,
+            );
+            if (sb != null) seat = (sb.$1, sb.$2, sb.$3, 0.0);
+          } else {
+            final so = seatOnWall(m, mdef, snapW);
+            if (so != null) seat = (so.$1, so.$2, so.$3, 0.0);
+          }
+        }
         final seatC = const Color(0xFF16A34A);
         final ghost = Block3d(
           def: mv.def,
@@ -941,10 +971,13 @@ class _PlanPainter extends CustomPainter {
           y: seat?.$1.dy ?? snapW.dy,
           rot: seat?.$2 ?? mv.rot,
           scale: mv.scale,
-          sx: mv.sx,
+          sx: seat != null && seat.$4 > 0
+              ? trussFitSx(mv.scale, mdef.w, seat.$4)
+              : mv.sx,
           sy: mv.sy,
           sz: mv.sz,
           bz: mv.bz,
+          panels: mv.panels,
         );
         final pen = Paint()
           ..style = PaintingStyle.stroke
@@ -1857,6 +1890,18 @@ class _SolidPainter extends CustomPainter {
           ..color = accent.withValues(alpha: 0.75),
       );
     }
+    // one stick per member — a truss member's plate outline reads as
+    // a doubled pair of lines in the ghost; centerlines don't
+    void ghostLine(List<double> a, List<double> b) {
+      canvas.drawLine(
+        st._proj3(a, size),
+        st._proj3(b, size),
+        Paint()
+          ..color = accent.withValues(alpha: 0.85)
+          ..strokeWidth = 2.4
+          ..strokeCap = StrokeCap.round,
+      );
+    }
 
     // snap inference on the ground plane — one target feeds the
     // wall/block ghosts, the glyph and `_modelTap`, matching the plan
@@ -1900,15 +1945,27 @@ class _SolidPainter extends CustomPainter {
     }
     if (st._tool == _MTool.block && st._hover3 != null) {
       final g = st._s2g(st._hover3!, st._vp3);
-      var w = snap3?.p ?? Offset(st._w(g.dx), st._w(g.dy));
+      final m3 = st._sel;
+      // trusses probe wall-top planes too — the wall under the
+      // CURSOR seats it, not just the ground shadow of the pointer
+      var w = isTrussDef(st._blkDef.id) && m3 != null
+          ? st._trussProbePt(m3, st._hover3!)
+          : (snap3?.p ?? Offset(st._w(g.dx), st._w(g.dy)));
       var rot3 = st._blkRot;
       var gz = 0.0;
-      final m3 = st._sel;
-      final seat3 = m3 == null
-          ? null
-          : (isTrussDef(st._blkDef.id)
-                ? seatTrussOnWalls(m3, w, rot3, st._blkDef.w)
-                : seatOnWall(m3, st._blkDef, w));
+      // unified seat tuple — $4 = truss bearing (0 for openings)
+      (Offset, double, double, double)? seat3;
+      if (m3 != null) {
+        if (isTrussDef(st._blkDef.id)) {
+          seat3 = seatTrussOnWalls(m3, w, rot3, st._blkDef.w, tol: 2.0);
+        } else if (isBeamDef(st._blkDef.id)) {
+          final sb = seatBeamOnWall(m3, w, rot3, st._blkDef.w, tol: 2.0);
+          if (sb != null) seat3 = (sb.$1, sb.$2, sb.$3, 0.0);
+        } else {
+          final so = seatOnWall(m3, st._blkDef, w);
+          if (so != null) seat3 = (so.$1, so.$2, so.$3, 0.0);
+        }
+      }
       if (seat3 != null) {
         w = seat3.$1;
         rot3 = seat3.$2;
@@ -1923,27 +1980,22 @@ class _SolidPainter extends CustomPainter {
         y: w.dy,
         rot: rot3,
         bz: gz,
+        // out-to-out: preview the span the bearing pair will fit
+        sx: seat3 != null && seat3.$4 > 0
+            ? trussFitSx(1.0, st._blkDef.w, seat3.$4)
+            : 1.0,
       );
       // a registered mesh previews the real piece — doors/windows
       // stand vertically IN the wall instead of a flat floor sliver;
-      // trusses preview via the parametric mesh (no OBJ registered)
-      final fs =
-          (isTrussDef(st._blkDef.id) ||
-              blockMeshes.containsKey(st._blkDef.id))
-          ? blockFaces(ghost, st._blkDef)
-          : null;
-      if (fs != null) {
-        // truss members are boxes: painting every face makes ONE
-        // member read as doubled boards — keep only the -Y side plates
-        // so the ghost shows the true member layout (fink vs kingpost)
-        final rgd = isTrussDef(st._blkDef.id)
-            ? Offset(-math.sin(rot3), math.cos(rot3))
-            : null;
-        for (final f in fs) {
-          if (rgd != null &&
-              f.n[0] * rgd.dx + f.n[1] * rgd.dy > -0.9) {
-            continue;
-          }
+      // trusses preview member CENTERLINES (one stick per member —
+      // each box member's plate outline reads as a doubled pair)
+      if (isTrussDef(st._blkDef.id)) {
+        for (final seg in trussMemberLines(ghost, st._blkDef)) {
+          ghostLine(seg[0], seg[1]);
+        }
+      } else if (blockMeshes.containsKey(st._blkDef.id)) {
+        for (final f in blockFaces(ghost, st._blkDef,
+            floors: m3 == null ? 1 : columnStackFloors(m3, ghost))) {
           ghostFace(f.v);
         }
       } else {
@@ -1978,21 +2030,38 @@ class _SolidPainter extends CustomPainter {
       final mdef = cadBlock(mv.def);
       if (mdef != null) {
         final g = st._s2g(st._hover3!, st._vp3);
-        var w = snap3?.p ?? Offset(st._w(g.dx), st._w(g.dy));
+        final m3 = st._sel;
+        var w = isTrussDef(mdef.id) && m3 != null
+            ? st._trussProbePt(m3, st._hover3!)
+            : (snap3?.p ?? Offset(st._w(g.dx), st._w(g.dy)));
         var rot3 = mv.rot;
         var gz = mv.bz;
-        final m3 = st._sel;
-        final seat3 = m3 == null
-            ? null
-            : (isTrussDef(mdef.id)
-                  ? seatTrussOnWalls(
-                      m3,
-                      w,
-                      rot3,
-                      mdef.w * mv.sx * mv.scale,
-                      ignore: mv,
-                    )
-                  : seatOnWall(m3, mdef, w));
+        // unified seat tuple — $4 = truss bearing (0 for openings)
+        (Offset, double, double, double)? seat3;
+        if (m3 != null) {
+          if (isTrussDef(mdef.id)) {
+            seat3 = seatTrussOnWalls(
+              m3,
+              w,
+              rot3,
+              mdef.w * mv.sx * mv.scale,
+              tol: 2.0,
+              ignore: mv,
+            );
+          } else if (isBeamDef(mdef.id)) {
+            final sb = seatBeamOnWall(
+              m3,
+              w,
+              rot3,
+              mdef.w * mv.sx * mv.scale,
+              tol: 2.0,
+            );
+            if (sb != null) seat3 = (sb.$1, sb.$2, sb.$3, 0.0);
+          } else {
+            final so = seatOnWall(m3, mdef, w);
+            if (so != null) seat3 = (so.$1, so.$2, so.$3, 0.0);
+          }
+        }
         if (seat3 != null) {
           w = seat3.$1;
           rot3 = seat3.$2;
@@ -2007,24 +2076,27 @@ class _SolidPainter extends CustomPainter {
           y: w.dy,
           rot: rot3,
           scale: mv.scale,
-          sx: mv.sx,
+          sx: seat3 != null && seat3.$4 > 0
+              ? trussFitSx(mv.scale, mdef.w, seat3.$4)
+              : mv.sx,
           sy: mv.sy,
           sz: mv.sz,
           bz: gz,
+          panels: mv.panels,
         );
-        final fs =
-            (isTrussDef(mdef.id) || blockMeshes.containsKey(mdef.id))
-            ? blockFaces(ghost, mdef)
-            : null;
-        if (fs != null) {
-          final rgd = isTrussDef(mdef.id)
-              ? Offset(-math.sin(rot3), math.cos(rot3))
-              : null;
+        final fs = isTrussDef(mdef.id)
+            ? null
+            : (blockMeshes.containsKey(mdef.id)
+                  ? blockFaces(ghost, mdef,
+                      floors: m3 == null ? 1 : columnStackFloors(m3, ghost))
+                  : null);
+        if (isTrussDef(mdef.id)) {
+          // same one-stick-per-member centerline ghost as placement
+          for (final seg in trussMemberLines(ghost, mdef)) {
+            ghostLine(seg[0], seg[1]);
+          }
+        } else if (fs != null) {
           for (final f in fs) {
-            if (rgd != null &&
-                f.n[0] * rgd.dx + f.n[1] * rgd.dy > -0.9) {
-              continue;
-            }
             ghostFace(f.v);
           }
         } else {

@@ -213,11 +213,16 @@ Takeoff modelTakeoff(Model3d m) {
         foots++;
         final sec = def.w * b.sx * b.scale;
         final f = footingFor(sec, b.footW);
-        footVol += f.vol + footingStemVol(sec, b.footD, f.t);
+        footVol += f.vol + footingStemVol(sec, blockFootingDepth(m, b), f.t);
         footW += f.w;
       }
     } else if (b.def.startsWith('stairs')) {
       stairs++;
+    } else if (isBeamDef(b.def)) {
+      // RC beam block: L × b × h concrete joins the tie/bond volume
+      beamVol += (def.w * b.sx * b.scale) *
+          (def.d * b.sy * b.scale) *
+          (def.height * b.sz * b.scale);
     } else if (b.def.startsWith('ftg-')) {
       // standalone footing pad: buried prism, real placed size
       foots++;
@@ -328,10 +333,11 @@ Takeoff modelTakeoff(Model3d m) {
     for (final t in f.trusses) {
       final def = cadBlock(t.def)!;
       final cw = trussChordWeb(
-        t.panels,
+        trussPanelCount(t, def),
         def.w * t.sx * t.scale,
         def.height * t.sz * t.scale,
         single: t.def == 'truss-sgl',
+        dbl: t.def == 'truss-dbl',
       );
       chord += cw.$1;
       webLm += cw.$2;
@@ -469,6 +475,14 @@ TakeoffWork? takeoffSteelSched(Model3d m) {
         notes.add(
             'FTG ${f.w.toStringAsFixed(1)}×${f.w.toStringAsFixed(1)}×${f.t.toStringAsFixed(2)}: ${f.bars.label} B/W');
       }
+    } else if (isBeamDef(b.def)) {
+      final len = def.w * b.sx * b.scale;
+      final wd = def.d * b.sy * b.scale, dp = def.height * b.sz * b.scale;
+      final s = beamSched(wd, dp, len);
+      acc(s.main);
+      acc(s.tie);
+      notes.add(
+          'BEAM ${wd.toStringAsFixed(2)}x${dp.toStringAsFixed(2)}x${len.toStringAsFixed(1)}m: ${s.main.label} + 10mm st @${(s.tieSpacing * 100).round()}cm');
     } else if (b.def.startsWith('ftg-')) {
       final side = def.w * b.sx * b.scale;
       final f = footingFor(0, side);

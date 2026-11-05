@@ -132,9 +132,9 @@ void main() {
   test('3D pick: column footing pad selects its column', () {
     final col = Block3d(def: 'col-sq', x: 0, y: 0, footing: true);
     final m = Model3d()..blocks.add(col);
-    // the pad top sits at bz - 0.60 + t = -0.30; tap its projected
-    // corner region, clear of the column body
-    final tap = proj([0.6, 0.6, -0.30], vp, yaw, pitch, zoom, off);
+    // lone column -> Table 305-1 1F default: pad spans bz-0.30..bz;
+    // tap its projected side, clear of the column body
+    final tap = proj([0.6, 0.6, -0.15], vp, yaw, pitch, zoom, off);
     final hit = pick3(m, tap, vp,
         yaw: yaw, pitch: pitch, zoom: zoom, off: off);
     expect(hit, same(col));

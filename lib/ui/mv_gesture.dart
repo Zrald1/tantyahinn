@@ -353,7 +353,26 @@ extension _MvGestures on _ModelViewState {
         Offset(b.x, b.y),
         b.rot,
         def.w * b.sx * b.scale,
+        tol: 2.0, // same reach the hover ghost previews with
         ignore: b,
+      );
+      if (seat == null) return false;
+      b.x = seat.$1.dx;
+      b.y = seat.$1.dy;
+      b.rot = seat.$2;
+      b.bz = seat.$3;
+      // out-to-out: the truss stretches to the bearing the walls hold
+      if (seat.$4 > 0) b.sx = trussFitSx(b.scale, def.w, seat.$4);
+      return true;
+    }
+    if (isBeamDef(b.def)) {
+      // beams run ALONG their support wall and rest on its top —
+      // their upper face becomes the plate trusses seat on
+      final seat = seatBeamOnWall(
+        m,
+        Offset(b.x, b.y),
+        b.rot,
+        def.w * b.sx * b.scale,
       );
       if (seat == null) return false;
       b.x = seat.$1.dx;
@@ -988,7 +1007,7 @@ extension _MvGestures on _ModelViewState {
     for (final b in m.blocks) {
       final def = cadBlock(b.def);
       if (def == null) continue;
-      final real = blockFaces(b, def);
+      final real = blockFaces(b, def, floors: columnStackFloors(m, b));
       if (real.isNotEmpty) {
         partFaces(real, b);
         continue;
@@ -1141,14 +1160,38 @@ extension _MvGestures on _ModelViewState {
   /// of [_proj3]: un-rotate the screen offset, then undo the yaw so a
   /// tap on the 3D canvas lands exactly where the cursor is. This is
   /// what lets users draw/select on the 3D side too.
-  Offset _s2g(Offset p, Size vp) {
+  /// Screen->world on the plane z=[z]: the orbit camera's ground
+  /// solve generalized — wall-top planes detect the wall the cursor
+  /// visually covers, not just the ground shadow of the pointer.
+  Offset _s2gAt(Offset p, Size vp, double z) {
     final f = _orbitFocus;
     final rx = (p.dx - vp.width / 2 - _o3.dx) / _z3;
     final pz = (vp.height / 2 + _o3.dy - p.dy) / _z3;
-    // pz = ry*sin(pitch) + (z - f.z)*cos(pitch); on the ground z = 0
-    final ry = (pz + f[2] * math.cos(_pitch)) / math.sin(_pitch);
+    // pz = ry*sin(pitch) + (z - f.z)*cos(pitch)
+    final ry = (pz + (f[2] - z) * math.cos(_pitch)) / math.sin(_pitch);
     final cy = math.cos(_yaw), sy = math.sin(_yaw);
     return Offset(rx * cy + ry * sy + f[0], -rx * sy + ry * cy + f[1]);
+  }
+
+  Offset _s2g(Offset p, Size vp) => _s2gAt(p, vp, 0.0);
+
+  /// The XY probe a truss placement solves from: the cursor's
+  /// intersection with the ground plane PLUS every wall-top plane —
+  /// whichever lands closest to a wall centerline wins, so pointing
+  /// at a wall face (or across a bay) seats the truss on THAT wall's
+  /// plate instead of the floor behind the cursor. Plain ground point
+  /// when nothing is under the cursor on any plane.
+  Offset _trussProbePt(Model3d m, Offset p) {
+    var pt = _s2g(p, _vp3), bd = nearestWallDist(m, pt);
+    for (final z in {for (final wl in m.walls) wl.top}) {
+      final c = _s2gAt(p, _vp3, z);
+      final d = nearestWallDist(m, c);
+      if (d < bd) {
+        bd = d;
+        pt = c;
+      }
+    }
+    return bd > 4.0 ? _s2g(p, _vp3) : pt;
   }
 
   /// Ground world point -> 3D screen px. Snap candidates are compared
@@ -1599,13 +1642,20 @@ extension _MvGestures on _ModelViewState {
         setState(() => _wall.add(w));
       case _MTool.block:
         if (!_groundEditable) return;
-        _placeBlock(_blkDef, w);
+        // trusses click-seat where the ghost previewed: probe the
+        // wall-top planes so pointing at a wall face places ON it
+        _placeBlock(
+          _blkDef,
+          isTrussDef(_blkDef.id) ? _trussProbePt(_sel!, p) : w,
+        );
       case _MTool.move:
         if (_moving == null) {
           final hit = _pick3(p, vp);
           if (hit is Block3d) _moveTap(w, b: hit);
         } else if (_groundEditable) {
-          _moveTap(w); // drop on the snap-resolved ground point
+          _moveTap(
+            isTrussDef(_moving!.def) ? _trussProbePt(_sel!, p) : w,
+          );
         }
       case _MTool.rotate:
         if (_rotating == null) {

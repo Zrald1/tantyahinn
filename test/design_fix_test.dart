@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:tantyahin/design_calc.dart';
 import 'package:tantyahin/model3d.dart';
@@ -125,13 +126,21 @@ void main() {
   test('footing depth: stem volume in takeoff + embedment check', () {
     final m = house();
     final b = m.blocks.first;
-    // default depth 0.60 adds a pedestal stem to the footing volume
+    // lone columns in a 1-storey house -> Table 305-1 default 0.30 m;
+    // pad top (0.30 thick) reaches the column base so the stem is 0
     final t0 = modelTakeoff(m);
     final sec = 0.3 * b.sx;
     final auto = footingFor(sec, 0);
-    final stem = sec * sec * (0.60 - auto.t);
+    expect(blockFootingDepth(m, b), 0.30);
+    final stem = sec * sec * math.max(0.30 - auto.t, 0);
     // every footing = pad + pedestal stem up to the column base
     expect(t0.footVol, closeTo(4 * (auto.vol + stem), 1e-6));
+    // a deeper manual depth grows the stem
+    b.footD = 0.60;
+    final stem60 = sec * sec * (0.60 - auto.t);
+    expect(modelTakeoff(m).footVol,
+        closeTo(3 * (auto.vol + stem) + auto.vol + stem60, 1e-6));
+    b.footD = 0;
     // shallow footing (0.20 < Table 305-1's 0.30 for a 1-storey model)
     // -> embedment warning with a depth fix to the floor-aware minimum
     b.footD = 0.20;
@@ -191,10 +200,10 @@ void main() {
     final m = house();
     m.blocks.first.footW = 2.2;
     final t = modelTakeoff(m);
-    // 3 auto footings (0.3m col -> 1.5x1.5x0.30 + 0.30x0.30 stem to
-    // 0.60m deep) + the 2.2m manual one (t=0.44, shorter stem)
-    final stemAuto = 0.3 * 0.3 * (0.60 - 0.30);
-    final stemMan = 0.3 * 0.3 * (0.60 - 0.44);
+    // 3 auto footings (0.3m col -> 1.5x1.5x0.30 pad; the 1-storey
+    // Table 305-1 default 0.30m leaves no stem) + the 2.2m manual one
+    // (t=0.44 already deeper than the 0.30 embedment -> no stem)
+    const stemAuto = 0.0, stemMan = 0.0;
     expect(
         t.footVol,
         closeTo(

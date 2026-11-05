@@ -37,6 +37,14 @@ JSON; rolling autosave keeps the project safe on every edit.
 - Check: `flutter analyze` | Test: `flutter test`
 - Dart scripts that import Flutter can't use `dart run` -> run them inside
   a `flutter test` file (see `test/gen_sample_test.dart`).
+- STANDING RULE (user): ALWAYS do web research before implementing any
+  feature — look up the proper real-world practice, code provisions, or
+  conventions first (NSCP tables for structural sizing, mill sections for
+  steel, trade detailing for roof/framing, platform UX norms for UI),
+  then encode the researched values as the defaults + tests. The NSCP
+  305-1 footing depths / 409.3.1.1 beam depths, C-purlin lipped-channel
+  profiles, and fink-family panel growth all came from research — never
+  guess dimensions or standards from memory.
 
 ## Architecture
 
@@ -87,11 +95,23 @@ JSON; rolling autosave keeps the project safe on every edit.
   generator and the DRAWINGS overlay or hotspots misalign. Division
   Engineer default is JONATHAN D. NARVATO; fromJson renames the old
   'VIRGILIO B. BANCASO' default on load (covers saved projects +
-  autosaves). CONST TRAP AGAIN: `OfficeHeader`/`SignatureBlock` read
+  autosaves). RETIRED NAMES: _retiredSignatoryNames (Virgilio,
+  Jonathan, Pedro, Norma) are BLANKED on every load — every template
+  id, via _normalizeSignatories(insertSeats: id=='deped'): only deped
+  re-inserts the 4 canonical seats; custom/private sign-offs get the
+  name scrub only. Matching goes through _canonName (upper + collapse
+  whitespace). Only 'GERALD BUSTILLA / Civil Engineer' survives as the
+  Prepared-by default. Exports never substitute names: an empty
+  signatory name renders blank — what the user typed is what exports.
+  CONST TRAP AGAIN: `OfficeHeader`/`SignatureBlock` read
   est.project in build — they must NOT be instantiated `const` in a
   listenable rebuild (the element update short-circuits and the
   private switch never repaints — cost a test failure). Same rule as
-  _ProjectTabs/_TemplateToggle.
+  _ProjectTabs/_TemplateToggle. The 5 theme-color slots default to
+  the brand palette (pink accent 0xFFD5008F, violet section band
+  0xFF7C3AED, violet/pink-50 tints for the rest) — the same literals
+  live in ProjectInfo.fromJson fallbacks AND theme_dialog _Slot
+  fallbacks (Reset all); keep all three sites in sync.
 - `lib/excel_export.dart` - writes the workbook replica; POW references
   BOQ subtotal cells (`_boqSubtotalRows` must mirror `_writeBoq` layout).
   All row numbers derive from `project.letterhead.length` (default 5)
@@ -366,19 +386,53 @@ JSON; rolling autosave keeps the project safe on every edit.
   side) within 0.55m; the nearest candidate wins, rot = wall angle,
   `$3` = host base -> `b.bz` like seatOnWall.
   Trusses use `seatTrussOnWalls(m, pos, rot, span, ignore:)` — a truss
-  bears on wall TOP PLATES: each span end finds its nearest wall seg
-  (1.2m tol); SPANNING is a GEOMETRY test not object identity: each
-  end collects ALL wall segs within tol, every (s1,s2) pair is tried,
-  a pair is a span when the line between bearing projections crosses
-  BOTH plates >30° (|sin|>0.5) and is <= span*1.3 — the WIDEST valid
-  pair wins (truss spans the whole roof before perching on a
-  partition). This made single-Wall3d polygon buildings spannable:
-  opposite sides of one polyline used to fail the old
-  `identical(wall)` check, degrading every seat to a wall-edge perch.
-  Only when no pair qualifies (or requireSpan -> null): the closest
-  plate gives a single-wall PERCH — span turns PERPENDICULAR to it,
-  centered on the plate projection, nearest hemisphere kept; no wall
-  -> null (volumeTopAt fallback). After the
+  bears on wall TOP PLATES. TWO-OPTION HOVER: the seat is solved on
+  EVERY orthogonal span axis — the armed rot AND the perpendicular of
+  each wall-direction family — so a rectilinear building always weighs
+  "span across the horizontal walls" vs "span across the vertical
+  walls". `_seatTrussRaw` returns (pos, rot, wallTop, reach) where
+  reach = the bearing distance of a real two-plate span (0 = perch).
+  Pick order across axes: ANY real span beats a perch; among spans
+  the SHORTER bearing distance wins (trusses frame the short
+  direction of a room — this is what flips a hover near a side wall
+  to the axis that actually crosses it); ties + perches break to the
+  seat nearest the pointer. Single-axis solving was the bug behind
+  "hover always lands wrong": a stored E-W rot perched diagonally on
+  whatever wall sat under the cursor while the N-S span went untried.
+  Inside one axis, SPANNING is an OUT-TO-OUT parallel-plate solve
+  (Medeek/Chief Architect rule: the walls dictate the span — the
+  truss STRETCHES to the bearing, never the reverse). The span LINE
+  through pos is intersected with each plate's line — the
+  intersection params ARE the truss ends, always ON the plates (a
+  4m truss in a 5.5m room now spans it; testing fixed ends at
+  pos±span/2 could never reach, so every axis fell back to the
+  outward-hanging perch). The axis must run ~perpendicular to the
+  plates (|sin(rot-plate)| >= 0.85 — an armed diagonal can't
+  produce a skewed staggered-bearing span), bearing must sit in
+  [0.3, min(max(span*2, span+2), 24)] (auto-fit range — the fink
+  auto-count grows the extra panels), the seat CENTERS between
+  its plates then RIDGE-SLIDES until both ends land IN-RUN on
+  their segs (_lamRange) — a hover past a wall end clamps to the
+  nearest real bay (gable-end truss) instead of an outward perch.
+  The probe must lie within the corridor the pair frames
+  (bearing/2 + tol) so a far pair can't teleport the drop; WIDEST
+  valid pair wins per axis (truss spans the whole roof before
+  perching on a partition). `reach` ($4) returns the bearing —
+  callers auto-fit the stretch via `trussFitSx(scale, defW,
+  bearing)` (clamped 0.25..8) so the placed/ghost truss's ends
+  land exactly on the plates: _seatOpening, the seat button,
+  _arrayTrusses per-bay, all four paint ghosts, and
+  migrateTrusses (heals stored trusses that were saved mid-perch
+  onto real spans). This made single-Wall3d polygon
+  buildings spannable: opposite sides of one polyline used to fail
+  the old `identical(wall)` check, degrading every seat to a
+  wall-edge perch. Only when no pair qualifies on ANY axis (or
+  requireSpan -> null): the closest plate gives a single-wall PERCH —
+  span turns PERPENDICULAR to it, centered on the plate projection,
+  nearest hemisphere kept — and when the armed rot is ~parallel to
+  the plate (hemisphere ambiguous) the perch biases INWARD toward
+  more wall support instead of cantilevering outside; no wall ->
+  null (volumeTopAt fallback). After the
   raw solve it RIDGE-GRID-SNAPS: the seat slides along the ridge dir
   to the nearest trussSpacing bay measured from the closest same-line
   truss (same span dir v within 0.6, cos(rot diff)>0.96); an occupied
@@ -387,13 +441,37 @@ JSON; rolling autosave keeps the project safe on every edit.
   screenshots were literally two blocks 0.15m apart, not doubled
   geometry). Off-grid >0.55sp keeps the free seat; the snapped point
   re-seats and must land on the same wall family (rot within 0.3,
-  top within 0.6) or the free seat wins. `ignore:` = the block being
+  top within 0.6) or the free seat wins. Bearing plates must be
+  PARALLEL too (|cos(a1-a2)| >= 0.85): at a corner a 45° span passed
+  the >30° test on BOTH perpendicular walls and widest-pair seated a
+  diagonal truss hanging off the wall ends — now such pairs are
+  rejected and the single-wall perpendicular perch takes over.
+  `ignore:` = the block being
   moved/pasted/re-seated — it's already in m.blocks and must not
   anchor the grid to itself (_seatOpening passes b always; the
   "Seat on wall top plates" inspector button and move ghosts pass
   the moving block; _arrayTrusses passes nothing — the seed IS the
   anchor). Every caller of seatTrussOnWalls (place, move, paste,
   seat button, array, plan+3D ghosts) shares this contract.
+  BEARING PLATES = `bearingSegs(m)`: wall top plates AND every 'beam'
+  block's top face (a beam's axis seg, top = bz + h*sz*scale) — the
+  pair solve, perch hits and candidate axes all read ONE list, so a
+  beam laid on a wall lifts the bearing line by its depth. Widest
+  pair wins per axis; on a bearing TIE the HIGHER plate bears (the
+  beam top beats the wall it lies on). The public seat returns
+  baseZ = plateTop + `kTrussSeatLift` (0.05 = bottom-chord half-depth:
+  the member is drawn centered on z=0, so the lift puts the chord
+  UNDERSIDE flush on the plate — bearing, not sinking half a member
+  in). Raw `_seatTrussRaw` still returns the bare plate top —
+  trussInRoof/migrate compares absorb the 5cm.
+  'beam' = RC beam block (def 4.0x0.20x0.30, concrete grey): drops
+  PARALLEL onto the nearest wall seg via `seatBeamOnWall` (clamped
+  inside the run, rests ON the wall top; free drop otherwise);
+  sy/sz adjust width/depth, inspector shows the NSCP sched +
+  L/16-depth warning (`nscpBeamDepth`/`nscpBeamWidth` —
+  Table 409.3.1.1 = span/16 simply supported, /18.5 one end, /21 both,
+  /8 cantilever, rounded UP to 50mm). Concrete joins `beamVol`;
+  rebar joins takeoffSteelSched via `beamSched(w,d,len)`.
   STACK GUARD: `trussSpotTaken(m,pos,ignore:)` = another truss within
   min(0.45, spacing*0.45) — place refuses with a snackbar, move
   reverts, paste skips; no path can stack two trusses into the
@@ -405,6 +483,15 @@ JSON; rolling autosave keeps the project safe on every edit.
   (user model: 6 fields/42 runs from 9 blocks -> 1 field before
   migration). modelFaces still DRAWS stored trusses (they exist,
   they're spare parts — hiding data is dishonest).
+  FIELD MERGE PASS: roofFields ends by MERGING same-roof fragments —
+  parallel ridge (|cos|>=0.978), same v roof line (<=lineTol), same
+  level (<=0.3 bz), truss-run gap <= connectTol=max(4.5,
+  trussSpacing*2). Hand-placed rot jitter (~5deg crossing a 10deg
+  bucket) and sparse unplaced bays no longer spray per-fragment
+  1m purlin stubs — the C-purlins connect truss to truss (user's
+  autosave: two sgl trusses 2.75m apart were 2 fields/14 runs).
+  REAL splits survive: perpendicular wings (ridge dot), parallel
+  roofs on a different v line, stepped levels (bz), distant gaps.
   LOAD-TIME MIGRATION: `migrateTrusses(m)` runs at the tail of
   Model3d.fromJson (heals open/autosave/tab-restore alike):
   rot normalizes to [0,pi) (orientation is modulo-pi — comparisons
@@ -427,33 +514,72 @@ JSON; rolling autosave keeps the project safe on every edit.
   dispatch site through isTrussDef — the catalog thumbnail
   (_BlockMeshThumb) was a missed hop: it read blockMeshes['truss']
   = the wh_truss MONO-PITCH OBJ while placement draws the fink;
-  truss defs now take trussLocalFaces there too. The 3D ghost also
-  needed filtering to the -Y member side plates (n·rd <= -0.9) —
-  drawing all 6 box faces makes ONE member read as doubled boards.
+  truss defs now take trussLocalFaces there too. The 3D ghost +
+  catalog thumb both draw `trussMemberLines(b, def)` — member
+  CENTERLINES, one stick per member — because even filtered to the
+  -Y plates, a box member's outline reads as a doubled pair of lines
+  (the user's "preview double" complaint); plates+strips are gone.
   The inspector's "Seat on wall top plates" button re-runs it.
+  HOVER PROBE: the 3D cursor unprojects to the GROUND plane, so a
+  pointer over a wall FACE used to land beside it and miss seating.
+  `_trussProbePt(m, screenPt)` solves the cursor ray on every
+  wall-top plane + ground and keeps whichever point is nearest a
+  centerline (`nearestWallDist`) — ghost, click AND drop all feed it
+  (place=preview parity), then seatTrussOnWalls runs at tol:2.0 so a
+  mid-room probe still finds the spanning pair or perches the plate
+  under the cursor. `_s2gAt(p,vp,z)` is the generalized unproject.
   `_seatOpening` routes col-sq/col-rd there and everything else to
   `seatOnWall`; `_moveTap` + `_pasteClip` re-seat through the same
   call so a dropped/moved/pasted column always lands on the wall.
-  TWO TRUSS DEFS: 'truss' = detailed fink (parametric, doubled-
-  looking members — that "doubling" in screenshots is BY DESIGN),
+  THREE TRUSS DEFS: 'truss' = detailed fink parametric web,
   'truss-sgl' = simple king-post A-frame (the earlier look, kept as
-  a second catalog option). EVERY truss check must go through
-  `isTrussDef(id)` — literal `== 'truss'` silently drops the single
-  variant from fields/seating/drawings/takeoff/ghosts (cost one
+  a second catalog option), 'truss-dbl' = DOUBLE mono-pitch from the
+  user's second SketchUp file (truss (1).skp -> assets/kenney/
+  dbl_truss.obj via the same -RubyStartup export): trussLocalFaces'
+  `dbl:` mode builds ONE flat frame twice at ±y inside the 0.18 m
+  depth — bottom chord, top chord rising heel (rise*0.18) to +X
+  high end, end posts + the same fink zigzag webs. memberLines returns
+  BOTH frames' centerlines (an honest double). MEMBER DEPTH:
+  trussLocalFaces clamps member Y-depth to <=0.05 (lumber on edge,
+  dbl plates ~0.06) — passing the full def.d footprint (0.18)
+  rendered each member's front+back plates as TWO parallel flat
+  trusses at iso. Library rows + drag feedback show trusses in
+  _BlockView.FRONT (like openings) — the iso wedge collapses all
+  variants to identical slivers. EVERY truss check must go through
+  `isTrussDef(id)` — literal `== 'truss'` silently drops the other
+  variants from fields/seating/drawings/takeoff/ghosts (cost one
   full fix pass: ~10 sites missed it). The two deliberate
-  exceptions: `blockLines` picks `_trussPlanLines` only for 'truss'
-  (sgl uses its static def.lines), and the inspector's "Web bays"
-  panels editor shows only for 'truss' (sgl has no panels).
-  TRUSS IS PARAMETRIC: `blockFaces` intercepts def 'truss' ->
-  `trussLocalFaces(b.panels, def.w, def.d, def.height)` (bottom+top
-  chords, vertical at each interior panel point, alternating Warren
-  diagonals; `Block3d.panels` 0=auto 4, serialized as 'panels') —
-  the static wh_truss OBJ is bypassed for placed trusses because a
-  fixed mesh can't change member count. 'truss-sgl' routes to
-  `trussSglLocalFaces` (bottom chord + 2 top chords + king post).
+  exceptions: `blockLines` picks `_trussPlanLines` for 'truss' +
+  'truss-dbl' (sgl uses its static def.lines), and the inspector's
+  "Web bays" panels editor hides only for 'truss-sgl'.
+  TRUSS IS PARAMETRIC + FINK-FAMILY (researched vs TRA/span tables):
+  `blockFaces` intercepts truss defs ->
+  `trussLocalFaces(trussPanelCount(b, def), def.w, def.d, def.height)`
+  — bottom+top chords + the W zigzag from `finkNodes(n, span)`:
+  bottom chord split into odd P panels (3=fink '4/3', 5=double '6/5',
+  7=triple '8/7', then keeps stepping odd to 11 so stretch always
+  grows webs), top into P+1; webs connect top_i->bot_i (compression
+  stub) and bot_i->top_{i+1} (tension diagonal). Once P >= 5 each
+  bottom joint ALSO gets a vertical post up to the rafter — the
+  Double Howe (KK) / Triple Fan / KKK families all carry posts, so a
+  stretched truss gains W cells AND verticals (a 4m fink = 7
+  members, an 8m triple = 21). `Block3d.panels` serialized as
+  'panels'.
+  RESOLVE VIA `trussPanelCount(b, def)` EVERYWHERE — explicit >=2
+  wins; 0=auto derives bays from the STRETCHED span
+  (def.w*sx*scale, ~1.0 m/bay so the stock 4m truss = 4) — stretching
+  length grows members instead of thinning them. Sites: blockFaces,
+  blockLines->_trussPlanLines, _elevScene web zigzag, takeoffRoofing
+  trussChordWeb, the inspector label, and move-ghost Block3d copies
+  MUST carry `panels:` (ghosts re-resolve otherwise).
+  the static wh_truss/dbl_truss OBJs are bypassed for placed trusses
+  because a fixed mesh can't change member count — they stay
+  registered in kKenneyMeshMap for catalog dims/mesh box, but
+  blockFaces/thumbs/ghosts all draw trussLocalFaces.
   The plan symbol goes through
-  `blockLines` -> `_trussPlanLines(b.panels)` (same bay count); the
-  gable elevations project the triangle + web ticks in `_elevScene`;
+  `blockLines` -> `_trussPlanLines(trussPanelCount)` (same finkNodes
+  positions: bottom-node ticks + projected W diagonals); the
+  gable elevations project the triangle + the W zigzag in `_elevScene`;
   `projectView` SheetView.roof adds truss symbols + `_roofFraming`
   (ridge/eaves/purlin runs + RAKE edges closing the roof outline at
   both run ends + roofing sheet-joint lines grouped by rot bucket at
@@ -483,11 +609,35 @@ JSON; rolling autosave keeps the project safe on every edit.
   eave-side views get the silhouette band + eave sheet edge — all
   from RoofField/RoofSpec math, never re-derived. In 3D,
   `purlinRuns(m)` emits one lipped C-channel per purlin ROW (same
-  stations as the plan lines: ridge/interior/eave rows, continuous
-  u0..u1 along the ridge) — real section (web x flange x lip x t,
-  mill tables), opening faces upslope, seated on the top chords
-  (+0.05 chord half-thk) with the eave run sagging to the overhang
-  tail. Plate thickness is floored at 12mm (`_purlinVisT`) so 1.2mm
+  stations as the plan lines: a ridge PAIR at ±half/(2·bays)
+  flanking the apex — never one straddling it, the peak keeps its
+  gap — interior rows + the last row ON the chord edge) — real
+  section (web x flange x lip x t, mill tables), opening faces
+  upslope. Runs end AT the gable trusses (the field's ±0.5 u0/u1
+  extension is sheet overhang, not steel — purlins poking past the
+  last truss dangled off the roof), and the last ROW sits at
+  |o|=half (the truss chord edge) — a row at half+overhang floats
+  ~0.5m past the eave on nothing; only the roof SHEET overhangs.
+  Each row's z rides the TOP
+  SURFACE ENVELOPE — max over member trusses of t.bz + its own
+  half/rise profile (mono 'truss-dbl' uses its heel->peak slope)
+  + (chordHalf + plateT/2) * slope/half + 0.008 — so mixed-stretch
+  fields never bore the channels through the taller chords. The
+  lift MUST be projected through the roof normal (×slope/half):
+  a flat +0.05 vertical bump only credits ~0.05*half/slope ALONG
+  n3 and leaves the channel ~1cm INSIDE the chord on any real
+  pitch (the "purlins through rafters" screenshot). Every truss's
+  chord is read at ITS OWN span
+  coordinate (project the station onto the truss's rot axis — a
+  truss offset off the field's ridge line used to be read at the
+  field's offset and floated the run ~0.1m over its chords — the
+  "purlins don't touch" screenshot), and the field's half/rise are
+  the run's
+  ENVELOPE (max), not b0's. The field ridge dir follows the
+  run's real first->last direction, not b0's stored rot — a
+  hand-placed jitter on the first truss used to tilt the whole
+  purlin set off the truss line. Plate thickness is floored at
+  12mm (`_purlinVisT`) so 1.2mm
   sheet stays visible; each run is its own painter group appended in
   `modelFaces` after blocks.
   CACHE TRAP: `modelFaces` is cached by `_geomSig()` — ANY derived
@@ -971,13 +1121,22 @@ JSON; rolling autosave keeps the project safe on every edit.
   `onDoubleTap` resets to 0.5; hover recolors the strip +
   `resizeColumn` cursor. The sash is a Row SIBLING (not an overlay)
   so it can never eat canvas edge interactions.
-- UNDO (`_undo`/`_pushUndo`/`_undoOp`, Ctrl+Z): a per-MODEL stack of
-  `jsonEncode(m.toJson())` snapshots (cap 60) pushed BEFORE every
-  structural op — wall close, block place, part move-grab, thickness
-  apply, rect/poly commit, delete. `_undoOp` pops, `Model3d.fromJson`
-  restores, splices volumes/walls/blocks into the live model, clears
-  selection+in-progress chains, `est.update()`. The stack is cleared
-  on every `_sel` change — never let it leak across models.
+- UNDO/REDO (`_undo`/`_redo`/`_pushUndo`/`_undoOp`/`_redoOp`, Ctrl+Z /
+  Ctrl+R / Ctrl+Y / Ctrl+Shift+Z): a per-MODEL pair of
+  `jsonEncode(m.toJson())` snapshot stacks (cap 60) pushed BEFORE
+  every structural op — wall close, block place, part move-grab,
+  thickness apply, rect/poly commit, delete, array, seat button,
+  inspector field commits. `_pushUndo` clears `_redo` (classic
+  contract). `_undoOp` pushes live state onto `_redo` then restores;
+  `_redoOp` mirrors it. `_restoreSnap` covers EVERYTHING toJson
+  carries — name, dims, roof spec, sheetPan — not just the part
+  lists (an early version spliced only volumes/walls/blocks and left
+  stale roof spec + dims after a revert). CONTINUOUS edits (typing
+  in an inspector field) must NOT push per keystroke — call
+  `_pushUndoTick(key)` instead: one snapshot per field per ~1.2s
+  burst; a discrete `_pushUndo` resets the burst key. The stacks are
+  cleared on every `_sel` change — never let them leak across models.
+  `pushUndoForTest()` is the widget-test hook.
 - GENERATE emits ONE DXF PER VIEW via `buildModelSheet(m, SheetView)`
   — ten `DrawingFile`s `sheet:<modelId>:{floorplan,structural,
   roofframe,electrical,plumbing,roofplan,front,rear,left,right}` in
@@ -999,9 +1158,32 @@ JSON; rolling autosave keeps the project safe on every edit.
   tags by m.blocks index — D# (door*/doorway*), W# (window*), O#
   (other openings) — so plan and all four elevations agree. The plan
   prefixes opening labels with the tag ('D1 · Door 0.90'); elevations
-  callout every drawn opening — floor-level doors tag+size ABOVE the
-  head, raised openings stack tag + W×H + 'SILL h' underneath
+  callout every drawn opening — floor-level doors tag ABOVE the head,
+  raised openings stack tag + 'SILL h' underneath, and `_openingDims`
+  adds real DIMENSION STRINGS per opening: a horizontal width string
+  below the sill (or above a grade-level head) and a vertical height
+  string on the roomier side (sibling-gap pick), 45° ticks + rotated
+  text via `_text`'s `rot:` (DXF code 50 — the composer MUST re-emit
+  tx.rotation or vertical texts flatten). `_text` insertion for rot:90
+  = the string's bottom end, so y = zmid - halflen centers it
   (test/elev_anno_test.dart).
+  SHEET LABEL LAYOUT: `_SheetLabels` (model3d.dart) is the AABB
+  collision tracker behind plan/structural/MEP annotation — every
+  emitted text claims a sheet-space box (`labels.claim`, or the
+  `labels:` param on `_dimString`/`_diagStrings`/`_roomLabels`), and
+  movable labels negotiate free slots with `labels.hits`. ORDER IS
+  THE CONTRACT: fixed ink claims first (dim strings -> dimEdge ->
+  manual dims -> room names), then block labels run LAST in
+  `_sheetContent`. Opening tags park OUTSIDE their wall (dominant
+  axis from the wall-envelope centre, 1 line — the name already
+  carries the size and dimEdge draws the width); solids try below ->
+  above -> along-run shifts -> flanks, dropping the WxD second line
+  before dropping the tag. `dimEdge` keeps its dim LINE anchored and
+  negotiates only the VALUE (along-run shifts, further out, then
+  drop). Structural F#/FP# callouts negotiate centred under pads ->
+  above -> sides, falling back to the bare tag inside the pad. Tests:
+  label_layout_test.dart renders a furnished model and asserts zero
+  text-box overlaps — the audit box must match _SheetLabels.box.
 - `lib/cpm.dart` - PERT/CPM engine: topological order + forward pass
   (ES/EF) + backward pass (LS/LF) + slack + critical path + cycle
   detection + level/lane layout for the network diagram; also
@@ -1067,13 +1249,48 @@ JSON; rolling autosave keeps the project safe on every edit.
   fill + theme border, orthogonal channel-routed connectors) for PDF and
   DOCX; `kChartFontFamily` is a TEST hook (gen_exports_test loads Arial
   so sample images have real text; null in the app).
-- Toolbar (`_TopBar` in main.dart): brand + project chip on the left;
-  actions in `_BarGroup` pills (New/Open/Save | Pricing/Labor/Colors) +
-  primary `_ExportMenu` pinned to the far right via `Expanded(Align(
-  centerRight, FittedBox(scaleDown)))`. Labels show >=1240px, icons-only
+- Toolbar (`_TopBar` in main.dart): brand on the left; actions in
+  `_BarGroup` pills (New/Open/Save | Pricing/Labor/Colors) + primary
+  `_ExportMenu` pinned to the far right via `Expanded(Align(
+  centerRight, FittedBox(scaleDown)))` — `ImportButton` (lib/ui/
+  import_menu.dart) sits just left of it: file picker accepting
+  xlsx/csv/tsv/txt/pdf/docx → `BoqImport.fromFile` parses to draft
+  sections → preview dialog (sections, item counts, warnings) →
+  `est.importBoq(sections, replace:)` commits append-or-replace with
+  fresh uuids. Labels show >=1240px, icons-only
   (tooltips) below; the cluster scales instead of clipping. Never reuse
   Icons.edit_outlined here - widget tests find the pen tool by it.
-  Project Details opens by clicking the project chip.
+  The project chip + ProjectDialog were REMOVED (redundant): project
+  fields edit inline on the BOQ sheet header + title on generated
+  sheets, unworkableDays lives in PROJECT SCHEDULE; the project tab
+  strip already shows the title.
+- `lib/boq_import.dart` - BOQ table importer. Every extractor emits
+  `List<List<String>>` rows and shares `rowsToSections`: detects a
+  column-header row (desc|qty|unit + a cost column — the POW sheet's
+  WORK ITEM/QTY/TOTAL/REMARKS layout fails the cost gate and is
+  skipped), merges a following 'Material Cost|Labor Cost' sub-header
+  into the unit-cost pair + shifts trailing columns by the span diff,
+  falls back to positional columns (warns). Text-only rows → section
+  when they carry a roman/letter/number prefix ('I.', 'PART 2'), else
+  groupHeader when a section exists and the text is mostly-caps; item
+  rows map desc/qty/unit/material/labor (+amount→unit-cost derive when
+  only a total column exists). `_stopRow` kills first-cell junk;
+  `_killAnywhere` kills summary tails ('I | DIRECT COST | 62,920') in
+  ANY cell. Extractors: xlsx via `excel` (only sheets whose first 60
+  rows contain a header — skips PERT/S-CURVE/DATA/POW), csv/tsv/txt
+  (RFC-4180 quoting + delimiter auto-detect), docx via archive+xml
+  (`w:tbl`→`w:tr`→`w:tc`, `w:gridSpan` expands to padding cells —
+  NOTE: xml pkg's findElements/getElement need qualified names;
+  `e.name.local == 'x'` matching and `getAttribute('val',
+  namespace: '*')` are what actually work), pdf via pdf_import.dart.
+- `lib/pdf_import.dart` - pdfium FFI (dart:ffi, no new deps): the
+  pdfium.dll bundled by pdfx (Release dir / pdfium-src/x64/bin).
+  MUST call `FPDF_InitLibraryWithConfig` (config v2, all-null) BEFORE
+  FPDF_LoadDocument — without it the dll hard-crashes the process.
+  Per page: FPDFText_LoadPage → per-char FPDFText_GetUnicode +
+  FPDFText_GetCharBox → cluster chars into lines by baseline (±40%
+  height), split lines into cells on gaps > ~2.2× median char width →
+  rows for rowsToSections. Scanned PDFs (zero chars) fail honestly.
 - Export orientation contract: BOQ/POW portrait, PERT-CPM/PERT-NETWORK/
   S-CURVE landscape in xlsx (`pageSetup`), pdf (page formats) and docx
   (`sectPr`). `test/gen_exports_test.dart` regenerates sample_estimate.
@@ -1409,15 +1626,23 @@ JSON; rolling autosave keeps the project safe on every edit.
   (`design-fix-all`). Off-screen rows are lazy — tests must
   `scrollUntilVisible` on the LAST Scrollable (params panel is first).
 - `Block3d.footW` = manual footing side, `Block3d.footD` = embedment
-  to pad BOTTOM below the block base (0 = default 0.60 m —
-  `footingDepth(footD)`; NSCP 2015 305.1/Table 305-1). Both serialized
-  + in _geomSig. EVERY footing consumer must use
-  `footingFor(sec, b.footW)` + `footingDepth(b.footD)` (render, takeoff,
-  inspector, design calc). Render = pad at [bz-d, bz-d+t] + a
-  column-section pedestal stem padTop->bz (`footingStemVol` adds it to
-  takeoff concrete). Design emits a per-footing embedment row
-  (warn below the Table 305-1 floor-aware minDep, 'footing-depth' fix).
-  Inspector exposes Side + Depth fields (0=auto/0.60).
+  to pad BOTTOM below the block base (0 = auto). NSCP 2015 §305.1 /
+  Table 305-1: `nscpFootingDepth(floors)` = 0.30/0.45/0.60 m for
+  1/2/3+ floors supported (roofs-only counts 1F); `footingDepth(footD,
+  [floors])` resolves manual-or-table; `columnStackFloors(m, b)` counts
+  the column's stacked levels (0.4 plan/0.3 bz tests); EVERY consumer
+  resolves depth through `blockFootingDepth(m, b)` — a lone column
+  defaults to 0.30, a 3-high stack 0.60. Both serialized + in _geomSig
+  (stack changes invalidate via the blocks' own x/y/bz hashes).
+  `footingFor(sec, b.footW)` sizes pad+t; render = pad at
+  [bz-d, bz-d+t] + a column-section pedestal stem padTop->bz
+  (`footingStemVol` takes the RESOLVED dep, adds it to takeoff
+  concrete). `blockFaces`/`blockFootingFaces` take `floors:` — scene
+  build, 3D pick and ghosts pass `columnStackFloors`. Design emits a
+  per-footing embedment row (warn below the Table 305-1 floor-aware
+  minDep, 'footing-depth' fix). Inspector exposes Side + Depth
+  (0=auto) fields + NSCP 305-1 preset chips AUTO/1F·0.30/2F·0.45/
+  3F·0.60 writing footD.
 - Placeable footing blocks: `ftg-150`/`ftg-200` in the Site library
   (square + X-cross plan symbol — standard structural notation).
   `blockFaces` renders them as a buried closed box, TOP face at `b.bz`

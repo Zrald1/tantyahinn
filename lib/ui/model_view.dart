@@ -202,38 +202,83 @@ class _ModelViewState extends State<ModelView> {
   /// settings, stretch, tint...) carries over without a hand list.
   (String, Map<String, dynamic>)? _clip;
 
-  // undo — snapshots of the selected model's json before every
-  // structural op (create/close/delete/move/commit)
+  // undo/redo — snapshots of the selected model's json before every
+  // structural op (create/close/delete/move/commit/property edit).
+  // Undo moves the live state onto _redo; any new op clears it — the
+  // classic contract. Restore covers EVERYTHING toJson carries
+  // (name/dims/roof/sheetPan included) or a revert silently leaves
+  // stale dims + roof spec behind.
   final List<String> _undo = [];
+  final List<String> _redo = [];
   void _pushUndo() {
     final m = _sel;
     if (m == null) return;
     _undo.add(jsonEncode(m.toJson()));
     if (_undo.length > 60) _undo.removeAt(0);
+    _redo.clear();
+    _tickKey = ''; // a discrete op breaks any typing burst
   }
 
-  void _undoOp() {
+  String _tickKey = '';
+  DateTime _tickAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// Undo push for CONTINUOUS edits — typing in an inspector field or
+  /// stepping a value: one snapshot per field per ~1.2s burst. The
+  /// first keystroke captures pre-mutation state; the rest of the
+  /// burst rides on it, so one Ctrl+Z reverts a whole typing session
+  /// instead of stepping back character by character.
+  void _pushUndoTick(String key) {
+    final now = DateTime.now();
+    if (key != _tickKey ||
+        now.difference(_tickAt).inMilliseconds > 1200) {
+      _pushUndo();
+      _tickKey = key;
+    }
+    _tickAt = now;
+  }
+
+  void _restoreSnap(String json) {
     final m = _sel;
-    if (m == null || _undo.isEmpty) return;
-    final snap = Model3d.fromJson(
-      jsonDecode(_undo.removeLast()) as Map<String, dynamic>,
-    );
+    if (m == null) return;
+    final j = jsonDecode(json) as Map<String, dynamic>;
+    final snap = Model3d.fromJson(j);
     setState(() {
-      m.volumes
-        ..clear()
-        ..addAll(snap.volumes);
-      m.walls
-        ..clear()
-        ..addAll(snap.walls);
-      m.blocks
-        ..clear()
-        ..addAll(snap.blocks);
+      m
+        ..name = snap.name
+        ..volumes.clear()
+        ..volumes.addAll(snap.volumes)
+        ..walls.clear()
+        ..walls.addAll(snap.walls)
+        ..blocks.clear()
+        ..blocks.addAll(snap.blocks)
+        ..dims.clear()
+        ..dims.addAll(snap.dims)
+        ..sheetPan.clear()
+        ..sheetPan.addAll(snap.sheetPan)
+        ..roof.loadFrom(Map<String, dynamic>.from(j['roof'] as Map? ?? {}));
       _clearSel();
       _wall.clear();
       _poly.clear();
       _rect0 = _rectCur = null;
     });
     est.update();
+  }
+
+  @visibleForTesting
+  void pushUndoForTest() => _pushUndo();
+
+  void _undoOp() {
+    final m = _sel;
+    if (m == null || _undo.isEmpty) return;
+    _redo.add(jsonEncode(m.toJson()));
+    _restoreSnap(_undo.removeLast());
+  }
+
+  void _redoOp() {
+    final m = _sel;
+    if (m == null || _redo.isEmpty) return;
+    _undo.add(jsonEncode(m.toJson()));
+    _restoreSnap(_redo.removeLast());
   }
 
   @override
@@ -281,7 +326,13 @@ class _ModelViewState extends State<ModelView> {
       _placeBlock(def, _snapPt(_s2w(local, rb.size), _pScale).p);
     } else {
       if (!_groundEditable) return; // flat pitch can't unproject
-      _placeBlock(def, _snapPt(_s2g(local, _vp3), _z3, _projGround).p);
+      final m3 = _ensureModel();
+      _placeBlock(
+        def,
+        isTrussDef(def.id)
+            ? _trussProbePt(m3, local)
+            : _snapPt(_s2g(local, _vp3), _z3, _projGround).p,
+      );
     }
     _blkDef = def; // keep armed for the next drop
   }
@@ -314,6 +365,7 @@ class _ModelViewState extends State<ModelView> {
     if (_sel != null && !est.models.contains(_sel)) {
       _sel = est.models.isEmpty ? null : est.models.first;
       _undo.clear();
+      _redo.clear();
       _vol = null;
       _wallSel = null;
       _blkSel = null;
@@ -356,6 +408,7 @@ class _ModelViewState extends State<ModelView> {
     setState(() {
       _sel = m;
       _undo.clear(); // undo stack is scoped to the selected model
+      _redo.clear();
       _vol = null;
       _wallSel = null;
       _blkSel = null;
@@ -373,6 +426,7 @@ class _ModelViewState extends State<ModelView> {
       setState(() {
         _sel = null;
         _undo.clear();
+        _redo.clear();
         _vol = null;
         _wallSel = null;
         _blkSel = null;
@@ -532,6 +586,7 @@ class _ModelViewState extends State<ModelView> {
         _blkRot += math.pi / 12;
         final b = _blkSel;
         if (b != null) {
+          _pushUndo();
           b.rot = _blkRot;
           est.update();
         }
@@ -573,6 +628,15 @@ class _ModelViewState extends State<ModelView> {
     const SingleActivator(LogicalKeyboardKey.digit3): () =>
         setState(() => _vp = _Vp.model),
     const SingleActivator(LogicalKeyboardKey.keyZ, control: true): _undoOp,
+    // redo — Ctrl+R and Ctrl+Y (drawings use the same chord), plus the
+    // Ctrl+Shift+Z idiom — all three run the same op
+    const SingleActivator(LogicalKeyboardKey.keyR, control: true): _redoOp,
+    const SingleActivator(LogicalKeyboardKey.keyY, control: true): _redoOp,
+    const SingleActivator(
+      LogicalKeyboardKey.keyZ,
+      control: true,
+      shift: true,
+    ): _redoOp,
     // clipboard — copy/cut the selected part, paste at the pointer
     const SingleActivator(LogicalKeyboardKey.keyC, control: true): _copySel,
     const SingleActivator(LogicalKeyboardKey.keyX, control: true): _cutSel,
@@ -940,10 +1004,12 @@ class _ModelViewState extends State<ModelView> {
                         behavior: HitTestBehavior.opaque,
                         onPanStart: (d) {
                           // a press on a bbox face handle starts a stretch
-                          // instead of the camera orbit
+                          // instead of the camera orbit — the whole drag
+                          // is ONE undo step, pushed at the grab
                           if (_tool == _MTool.select && _blkSel != null) {
                             final h = _handleAt(d.localPosition);
                             if (h >= 0) {
+                              _pushUndo();
                               setState(() => _stretchAxis = h);
                             }
                           }

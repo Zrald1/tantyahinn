@@ -218,8 +218,9 @@ void main() {
     test('concrete = slabs + columns + footings + beams (hand sum)', () {
       final slabs = 48 * (0.10 + 0.125 + 0.125);
       final cols = 12 * 0.3 * 0.3 * 3.0;
-      // pads + pedestal stems to the default 0.60 m embedment
-      final ftg = 6 * (1.5 * 1.5 * 0.30 + 0.3 * 0.3 * (0.60 - 0.30));
+      // pads + pedestal stems to the 2-storey Table 305-1 embedment
+      // (0.45 m — stacks resolve their own floor count)
+      final ftg = 6 * (1.5 * 1.5 * 0.30 + 0.3 * 0.3 * (0.45 - 0.30));
       final beams = 2 * 28 * 0.15 * 0.20;
       expect(t.concreteVol, closeTo(slabs + cols + ftg + beams, 1e-6));
     });

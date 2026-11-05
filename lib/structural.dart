@@ -88,6 +88,22 @@ MemberSched beamSched(double width, double depth, double len) {
   );
 }
 
+/// NSCP 2015 Table 409.3.1.1 (ACI 318 T9.3.1.1): minimum beam overall
+/// depth for deflection control WITHOUT calculation — simply
+/// supported L/16, one end continuous L/18.5, both ends continuous
+/// L/21, cantilever L/8 (normal-weight concrete, fy 420 MPa). Pass the
+/// divisor for the support condition; the result rounds UP to 50mm
+/// formwork increments, floor 0.20 m.
+double nscpBeamDepth(double span, {double cont = 16}) =>
+    math.max(0.20, ((span / cont) * 20).ceilToDouble() / 20);
+
+/// Practical minimum beam width — 0.20 m is the floor that fits two
+/// bars + stirrups + 40mm cover (NSCP §418.6.2.1's SMF floor is
+/// min(0.3h, 200mm) post-2nd-printing); half the depth keeps the
+/// section proportional, rounded UP to 50mm.
+double nscpBeamWidth(double depth) =>
+    math.max(0.20, ((depth / 2) * 20).ceilToDouble() / 20);
+
 /// ISOLATED SQUARE FOOTING — NBCP minimums for dwellings (≥0.25m
 /// thick) + typical PH residential schedule: side ≈ 5× column width,
 /// min 1.0m; thickness = max(0.25, W/5); mat bars 12mm @ 0.20 both
@@ -117,18 +133,27 @@ FootingSched footingFor(double colSec, double side) {
   return FootingSched(w, t, BarSched(n * 2, dia, barLen));
 }
 
+/// NSCP 2015 §305.1 / Table 305-1 — minimum depth of footing base
+/// below undisturbed ground surface, by the number of floors the
+/// foundation supports: 1F = 0.30 m, 2F = 0.45 m, 3F+ = 0.60 m.
+/// (Table note 3: a foundation carrying a roof only counts as 1
+/// floor; roofs add on top of the tabulated floors.)
+double nscpFootingDepth(int floors) =>
+    const [0.30, 0.45, 0.60][floors.clamp(1, 3) - 1];
+
 /// Effective footing embedment depth (m): the pad bottom sits this
-/// far below the column base. `footD` <= 0 means the standard default
-/// 0.60 m below grade (NSCP 2015 305.1 / Table 305-1: footing base
-/// below undisturbed grade, 0.60 m where 3+ floors are supported).
-double footingDepth(double footD) => footD > 0 ? footD : 0.60;
+/// far below the column base. `footD` <= 0 means the Table 305-1
+/// standard for [floors] supported (0/negative -> 1 floor, 0.30 m).
+double footingDepth(double footD, [int floors = 1]) =>
+    footD > 0 ? footD : nscpFootingDepth(floors < 1 ? 1 : floors);
 
 /// Concrete volume of the pedestal stem between the pad top and the
-/// column base (0 when the pad top reaches the base). The stem is a
-/// square prism of the column section (>= 0.20 m) — poured with the
-/// footing, so it counts as footing concrete.
-double footingStemVol(double colSec, double footD, double padT) {
-  final h = footingDepth(footD) - padT;
+/// column base (0 when the pad top reaches the base). [dep] is the
+/// RESOLVED embedment (`footingDepth`/`blockFootingDepth` output).
+/// The stem is a square prism of the column section (>= 0.20 m) —
+/// poured with the footing, so it counts as footing concrete.
+double footingStemVol(double colSec, double dep, double padT) {
+  final h = dep - padT;
   if (h <= 0) return 0;
   final s = math.max(colSec, 0.20);
   return s * s * h;

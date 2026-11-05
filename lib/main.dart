@@ -12,13 +12,13 @@ import 'excel_export.dart';
 import 'export_package.dart';
 import 'model3d.dart' show preloadBlockMeshes;
 import 'open_file.dart';
-import 'models.dart';
 import 'pdf_export.dart';
 import 'state.dart';
 import 'ui/carabao_logo.dart';
 import 'ui/design_view.dart';
 import 'ui/drawing_view.dart';
 import 'ui/extension_view.dart';
+import 'ui/import_menu.dart';
 import 'ui/labor_dialog.dart';
 import 'ui/manage_view.dart';
 import 'ui/model_view.dart';
@@ -390,7 +390,6 @@ class _TopBar extends StatelessWidget {
         builder: (context, c) {
           final labels = c.maxWidth >= 1240;
           final subtitle = c.maxWidth >= 1560;
-          final chipVisible = c.maxWidth >= 980;
           return Row(
             children: [
               Container(
@@ -428,16 +427,6 @@ class _TopBar extends StatelessWidget {
                     ),
                 ],
               ),
-              if (chipVisible) ...[
-                const SizedBox(width: 18),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 300),
-                  child: ListenableBuilder(
-                    listenable: est,
-                    builder: (_, _) => _ProjectChip(),
-                  ),
-                ),
-              ],
               // Actions are pinned to the FAR RIGHT; if the window is ever
               // too narrow the cluster scales down instead of clipping.
               Expanded(
@@ -510,6 +499,8 @@ class _TopBar extends StatelessWidget {
                           ],
                         ),
                         const SizedBox(width: 12),
+                        const ImportButton(),
+                        const SizedBox(width: 8),
                         _ExportMenu(onExport: onExport),
                       ],
                     ),
@@ -836,190 +827,6 @@ class _ViewTabs extends StatelessWidget {
           ],
         ),
       ),
-    );
-  }
-}
-
-class _ProjectChip extends StatefulWidget {
-  @override
-  State<_ProjectChip> createState() => _ProjectChipState();
-}
-
-class _ProjectChipState extends State<_ProjectChip> {
-  bool _hover = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final p = est.project;
-    final cs = Theme.of(context).colorScheme;
-    // tap = project details dialog
-    return Tooltip(
-      message: 'Project details',
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        onEnter: (_) => setState(() => _hover = true),
-        onExit: (_) => setState(() => _hover = false),
-        child: GestureDetector(
-          onTap: () => showDialog(
-            context: context,
-            builder: (_) => ProjectDialog(project: p),
-          ),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 120),
-            height: 38,
-            padding: const EdgeInsets.fromLTRB(6, 0, 12, 0),
-            decoration: BoxDecoration(
-              color: _hover ? Colors.white : const Color(0xFFF8FAFC),
-              borderRadius: BorderRadius.circular(19),
-              border: Border.all(
-                color: _hover
-                    ? cs.primary.withValues(alpha: .5)
-                    : const Color(0xFFE2E8F0),
-              ),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 26,
-                  height: 26,
-                  decoration: BoxDecoration(
-                    color: cs.primary.withValues(alpha: .12),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(Icons.apartment, size: 15, color: cs.primary),
-                ),
-                const SizedBox(width: 8),
-                Flexible(
-                  child: Text(
-                    p.title.isEmpty ? 'Untitled project' : p.title,
-                    style: const TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                const SizedBox(width: 6),
-                const Icon(
-                  Icons.more_horiz,
-                  size: 14,
-                  color: Color(0xFF94A3B8),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Project details dialog. Signatories are edited on the sheet itself
-/// (click to edit, right-click to delete, "Add signatory" to append).
-class ProjectDialog extends StatefulWidget {
-  final ProjectInfo project;
-  const ProjectDialog({super.key, required this.project});
-
-  @override
-  State<ProjectDialog> createState() => _ProjectDialogState();
-}
-
-class _ProjectDialogState extends State<ProjectDialog> {
-  late final Map<String, TextEditingController> c;
-
-  @override
-  void initState() {
-    super.initState();
-    final p = widget.project;
-    c = {
-      'title': TextEditingController(text: p.title),
-      'location': TextEditingController(text: p.location),
-      'division': TextEditingController(text: p.division),
-      'cd': TextEditingController(text: p.contractDuration),
-      'unwork': TextEditingController(text: '${p.unworkableDays}'),
-      'fund': TextEditingController(text: p.sourceOfFund),
-      'target': TextEditingController(text: p.physicalTarget),
-    };
-  }
-
-  @override
-  void dispose() {
-    for (final x in c.values) {
-      x.dispose();
-    }
-    super.dispose();
-  }
-
-  Widget _f(String label, String key) => Padding(
-    padding: const EdgeInsets.only(bottom: 10),
-    child: TextField(
-      controller: c[key],
-      decoration: InputDecoration(labelText: label),
-    ),
-  );
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Project Details'),
-      content: SizedBox(
-        width: 460,
-        child: SingleChildScrollView(
-          child: Column(
-            children: [
-              _f('Project title', 'title'),
-              _f('Location', 'location'),
-              _f('Division', 'division'),
-              Row(
-                children: [
-                  Expanded(child: _f('Contract duration', 'cd')),
-                  const SizedBox(width: 10),
-                  Expanded(child: _f('Unworkable days (weather)', 'unwork')),
-                ],
-              ),
-              Row(
-                children: [
-                  Expanded(child: _f('Source of fund', 'fund')),
-                  const SizedBox(width: 10),
-                  Expanded(child: _f('Physical target', 'target')),
-                ],
-              ),
-              const Divider(height: 24),
-              const Text(
-                'Signatories are edited on the sheet — click one to edit, '
-                'right-click to delete, or use "Add signatory".',
-                style: TextStyle(fontSize: 11, color: Color(0xFF64748B)),
-              ),
-            ],
-          ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () {
-            final p = widget.project;
-            p.title = c['title']!.text;
-            p.location = c['location']!.text;
-            p.division = c['division']!.text;
-            p.contractDuration = c['cd']!.text;
-            final u = int.tryParse(c['unwork']!.text);
-            if (u != null && u >= 0 && u <= 3650) {
-              p.unworkableDays = u;
-            }
-            p.sourceOfFund = c['fund']!.text;
-            p.physicalTarget = c['target']!.text;
-            est.update();
-            est.syncSchedule();
-            Navigator.pop(context);
-          },
-          child: const Text('Apply'),
-        ),
-      ],
     );
   }
 }

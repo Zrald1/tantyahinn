@@ -54,6 +54,7 @@ class _BlockMeshThumb extends CustomPainter {
               def.d,
               def.height,
               single: def.id == 'truss-sgl',
+              dbl: def.id == 'truss-dbl',
             )
           : blockMeshes[def.id];
 
@@ -122,6 +123,48 @@ class _BlockMeshThumb extends CustomPainter {
 
     canvas.save();
     canvas.clipRect(Offset.zero & size);
+    if (isTrussDef(def.id)) {
+      // stick figure — one centerline per member; a member plate's
+      // two rails read as a doubled pair at icon size, so 'single'
+      // and 'fink' thumbs were indistinguishable
+      Offset pr(List<double> p) => cam3Project(
+        p,
+        size,
+        yaw: yaw,
+        pitch: pitch,
+        zoom: zoom,
+        off: off,
+      );
+      final segs = <(Offset, Offset, int)>[];
+      for (final f in m) {
+        if (f.n[1] > -0.9) continue; // -Y plate = one per member
+        segs.add((
+          pr([
+            (f.v[0][0] + f.v[3][0]) / 2,
+            (f.v[0][1] + f.v[3][1]) / 2,
+            (f.v[0][2] + f.v[3][2]) / 2,
+          ]),
+          pr([
+            (f.v[1][0] + f.v[2][0]) / 2,
+            (f.v[1][1] + f.v[2][1]) / 2,
+            (f.v[1][2] + f.v[2][2]) / 2,
+          ]),
+          f.argb,
+        ));
+      }
+      for (final (a, b, argb) in segs) {
+        canvas.drawLine(
+          a,
+          b,
+          Paint()
+            ..color = Color(argb)
+            ..strokeWidth = 1.8
+            ..strokeCap = StrokeCap.round,
+        );
+      }
+      canvas.restore();
+      return;
+    }
     final edge = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 0.6

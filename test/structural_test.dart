@@ -80,10 +80,10 @@ void main() {
           .add(Volume3d(footprint: [0, 0, 8, 0, 8, 3, 0, 3], height: 0.10));
     final t = modelTakeoff(m);
     expect(t.footCount, 1);
-    // col-sq 0.3 → footing 1.5×1.5×0.30 = 0.675 cu.m + 0.30×0.30
-    // pedestal stem to the default 0.60 m embedment depth
-    expect(t.footVol,
-        closeTo(1.5 * 1.5 * 0.30 + 0.3 * 0.3 * (0.60 - 0.30), 1e-9));
+    // col-sq 0.3 → footing 1.5×1.5×0.30 = 0.675 cu.m; the lone column
+    // resolves the Table 305-1 1-floor default (0.30 m) so the pad top
+    // reaches the column base with no pedestal stem
+    expect(t.footVol, closeTo(1.5 * 1.5 * 0.30, 1e-9));
     expect(t.footW, 1.5);
     expect(t.tieLen, closeTo(6, 1e-9));
     expect(t.bondLen, closeTo(6, 1e-9));
@@ -99,6 +99,34 @@ void main() {
     expect(t.slabs[0].$2, isTrue);
     expect(t.slabs[0].$3, closeTo(3 / 28, 1e-9));
     expect(t.slabs[0].$3 > t.slabs[0].$4, isTrue); // under-thick flag
+  });
+
+  test('footing depth defaults to Table 305-1 by the column stack', () {
+    // NSCP 2015 §305.1 Table 305-1: 1F=0.30, 2F=0.45, 3F+=0.60 m
+    expect(nscpFootingDepth(1), 0.30);
+    expect(nscpFootingDepth(2), 0.45);
+    expect(nscpFootingDepth(3), 0.60);
+    expect(nscpFootingDepth(9), 0.60); // clamps at 3+
+    final m = Model3d()
+      ..blocks.add(Block3d(def: 'col-sq', x: 0, y: 0, footing: true))
+      ..blocks.add(Block3d(def: 'col-sq', x: 5, y: 0, footing: true))
+      ..blocks.add(Block3d(def: 'col-sq', x: 5, y: 0, bz: 3.1))
+      ..blocks.add(Block3d(def: 'col-sq', x: 5, y: 0, bz: 6.2));
+    final lone = m.blocks[0], stacked = m.blocks[1];
+    // lone column -> 1 floor; the 3-high stack -> 3 floors
+    expect(columnStackFloors(m, lone), 1);
+    expect(columnStackFloors(m, stacked), 3);
+    expect(blockFootingDepth(m, lone), 0.30);
+    expect(blockFootingDepth(m, stacked), 0.60);
+    // a manual footD always wins over the stack default
+    stacked.footD = 0.80;
+    expect(blockFootingDepth(m, stacked), 0.80);
+    // the render faces the same resolved depth (pad bottom = -0.80)
+    final zs = blockFaces(m.blocks[1], cadBlock('col-sq')!,
+            floors: columnStackFloors(m, m.blocks[1]))
+        .expand((f) => f.v)
+        .map((p) => p[2]);
+    expect(zs.reduce((a, b) => a < b ? a : b), closeTo(-0.80, 1e-9));
   });
 
   test('takeoffSteelSched aggregates kg by diameter + wire', () {

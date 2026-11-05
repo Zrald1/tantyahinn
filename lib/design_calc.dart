@@ -75,7 +75,7 @@ bool applyDesignFix(Model3d m, DesignFix fix) {
           final k = fix.value / cur;
           b.sx *= k;
           b.sy *= k;
-          final dep = fix.values?['dep'] ?? footingDepth(0);
+          final dep = fix.values?['dep'] ?? nscpFootingDepth(3);
           b.bz = def.height * b.sz * b.scale - dep;
           return true;
         }
@@ -939,7 +939,7 @@ CalcReport designCalc(Model3d m, DesignParams p) {
     ftgRows.add(
       row(
         provided > 0
-            ? 'F${i + 1}  ${_f(provided, 1)}x${_f(provided, 1)}x${_f(provT)} @${_f(b.footing ? footingDepth(b.footD) : provT - pad!.bz)}m deep${pad != null ? ' (pad block)' : ''}  (provided${fok == Chk.fail ? ', need >= ${_f((sideReq * 10).ceil() / 10, 1)} m sq.' : ''})'
+            ? 'F${i + 1}  ${_f(provided, 1)}x${_f(provided, 1)}x${_f(provT)} @${_f(b.footing ? blockFootingDepth(m, b) : provT - pad!.bz)}m deep${pad != null ? ' (pad block)' : ''}  (provided${fok == Chk.fail ? ', need >= ${_f((sideReq * 10).ceil() / 10, 1)} m sq.' : ''})'
             : 'F${i + 1}  no footing set - required min ${_f(math.max(side, footingSched(sec).w), 1)}m sq.',
         'q = ${_f(qNet, 1)} kPa vs qa ${_f(p.qa, 0)}',
         f: 'q = (P + Wf)/A, P = ${_f(ser, 1)} kN service',
@@ -974,7 +974,7 @@ CalcReport designCalc(Model3d m, DesignParams p) {
       );
       // embedment depth - NSCP 305.1 / Table 305-1: footing base
       // below undisturbed grade, scaled by floors supported
-      final dep = b.footing ? footingDepth(b.footD) : provT - pad!.bz;
+      final dep = b.footing ? blockFootingDepth(m, b) : provT - pad!.bz;
       ftgRows.add(
         row(
           'F${i + 1} embedment depth',

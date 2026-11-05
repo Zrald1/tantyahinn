@@ -1017,6 +1017,128 @@ List<List<Offset>> wallSegPieces(Model3d m, Wall3d w, int i) {
   return bestP == null ? null : (bestP, brot, bz);
 }
 
+/// Seat a BEAM onto a wall: it aligns PARALLEL to the nearest seg's
+/// centerline (a beam runs along its support wall), clamped inside
+/// the run so it never hangs past a wall end, and rests ON the wall
+/// top — its upper face becomes the plate trusses bear on. Returns
+/// (position, rotation, baseZ) or null past [tol].
+(Offset, double, double)? seatBeamOnWall(
+  Model3d m,
+  Offset pos,
+  double rot,
+  double len, {
+  double tol = 1.5,
+}) {
+  Offset? bestP;
+  var bestD = tol, brot = 0.0, bz = 0.0;
+  for (final wl in m.walls) {
+    for (var i = 0; i < wl.segs; i++) {
+      final a = Offset(wl.pts[i * 2], wl.pts[i * 2 + 1]);
+      final c = Offset(wl.pts[i * 2 + 2], wl.pts[i * 2 + 3]);
+      final s = c - a;
+      final l2 = s.dx * s.dx + s.dy * s.dy;
+      if (l2 < 1e-9) continue;
+      final sl = math.sqrt(l2);
+      // clamp inside the run — a beam longer than the wall centers on
+      // the seg instead of hanging off an end
+      final hf = math.min(len, sl) / 2 / sl;
+      final t =
+          (((pos.dx - a.dx) * s.dx + (pos.dy - a.dy) * s.dy) / l2).clamp(
+            hf,
+            1 - hf,
+          );
+      final q = Offset(a.dx + s.dx * t, a.dy + s.dy * t);
+      final d = (pos - q).distance;
+      if (d < bestD) {
+        bestD = d;
+        brot = math.atan2(s.dy, s.dx);
+        // keep the armed hemisphere so the beam doesn't flip mid-drag
+        if (math.cos(brot - rot) < 0) brot += math.pi;
+        bz = wl.top;
+        bestP = q;
+      }
+    }
+  }
+  return bestP == null ? null : (bestP, brot, bz);
+}
+
+/// Min distance from [p] to any wall centerline segment — the
+/// hover-probe's "is a wall under the cursor" metric (same projection
+/// math _seatTrussRaw uses per seg).
+double nearestWallDist(Model3d m, Offset p) {
+  var bd = double.infinity;
+  for (final wl in m.walls) {
+    for (var i = 0; i < wl.segs; i++) {
+      final a = Offset(wl.pts[i * 2], wl.pts[i * 2 + 1]);
+      final c = Offset(wl.pts[i * 2 + 2], wl.pts[i * 2 + 3]);
+      final s = c - a;
+      final l2 = s.dx * s.dx + s.dy * s.dy;
+      if (l2 < 1e-9) continue;
+      final t =
+          (((p.dx - a.dx) * s.dx + (p.dy - a.dy) * s.dy) / l2).clamp(
+        0.0,
+        1.0,
+      );
+      final d = (p - Offset(a.dx + s.dx * t, a.dy + s.dy * t)).distance;
+      if (d < bd) bd = d;
+    }
+  }
+  return bd;
+}
+
+/// Every BEARING PLATE a truss can rest on, as (start, unit dir,
+/// length, top z, key): each wall seg contributes its top plate, and
+/// every 'beam' block contributes a seg along its axis whose top is
+/// the beam's upper face — a beam laid on a wall top lifts the
+/// bearing line by exactly the beam depth. One collector shared by
+/// the seat solve's pair/hit/nearest passes AND the multi-axis
+/// candidate scan, so walls and beams always agree on what supports.
+List<(Offset, Offset, double, double, int)> bearingSegs(Model3d m) {
+  final segs = <(Offset, Offset, double, double, int)>[];
+  var k = 0;
+  for (final wl in m.walls) {
+    for (var i = 0; i < wl.segs; i++, k++) {
+      final a = Offset(wl.pts[i * 2], wl.pts[i * 2 + 1]);
+      final c = Offset(wl.pts[i * 2 + 2], wl.pts[i * 2 + 3]);
+      final s = c - a;
+      final len = s.distance;
+      if (len < 1e-9) continue;
+      segs.add((a, s / len, len, wl.top, k));
+    }
+  }
+  for (final bl in m.blocks) {
+    if (!isBeamDef(bl.def)) continue;
+    final d = cadBlock(bl.def);
+    if (d == null) continue;
+    final len = d.w * bl.sx * bl.scale;
+    if (len < 1e-9) continue;
+    final u = Offset(math.cos(bl.rot), math.sin(bl.rot));
+    segs.add((
+      Offset(bl.x, bl.y) - u * len / 2,
+      u,
+      len,
+      bl.bz + d.height * bl.sz * bl.scale,
+      k++,
+    ));
+  }
+  return segs;
+}
+
+/// Seat lift: a truss mesh draws its bottom chord CENTERED on the
+/// block's z=0 plane, so the chord underside sits half a chord
+/// (~0.05 m) below bz. The public seat returns support-top + this
+/// lift — the chord UNDERSIDE rests flush on the plate (bearing on
+/// the wall, not sinking half a member into it).
+const double kTrussSeatLift = 0.05;
+
+/// Ridge-slide bounds: given the projection parameter [t0] of a truss
+/// end on a plate seg and the slide rate [k] (how much t moves per
+/// metre of ridge travel), the λ interval keeping t in [0,1] — i.e.
+/// where along the wall run the seat may sit before the end slides
+/// off the plate's end.
+(double, double) _lamRange(double t0, double k) =>
+    k > 0 ? (-t0 / k, (1 - t0) / k) : ((1 - t0) / k, -t0 / k);
+
 /// Seat a ROOF TRUSS: it bears on wall TOP PLATES at its two ends —
 /// never floats at floor height (the old bug: a truss dropped mid-air
 /// at door level). The span's two bearing ends each look for the
@@ -1025,10 +1147,22 @@ List<List<Offset>> wallSegPieces(Model3d m, Wall3d w, int i) {
 /// bz at that wall's top and turns the span perpendicular to it
 /// (bearing plate runs ALONG the wall); none -> null (free drop,
 /// caller falls back to [volumeTopAt]/ground).
-/// Seat a truss on the wall plates — raw bearing solve. [pos]/[rot]
-/// are the requested drop; span ends project to the nearest wall segs.
-/// Returns (position, rotation, wallTopZ) or null off-wall.
-(Offset, double, double)? _seatTrussRaw(
+/// Raw bearing solve. [pos]/[rot] are the requested drop. The pair
+/// solve tries every PARALLEL plate pair: the span LINE through pos
+/// intersects each plate line — the plates dictate the bearing
+/// (out-to-out, so a truss shorter than the room still seats and the
+/// caller stretches it to fit). The seat centers between its plates,
+/// then slides along the ridge until both ends land IN-RUN on their
+/// segs — a hover past a wall end clamps to the nearest real bay
+/// instead of perching off the corner (the Revit rule: both truss
+/// endpoints always land on load-bearing elements). The probe must
+/// lie within the corridor the pair frames (bearing/2 + tol) so a
+/// far-away pair can't teleport the drop. Returns (position,
+/// rotation, wallTopZ, reach) or null off-wall — `reach` = the
+/// bearing distance of a real two-plate span (0 marks a single-wall
+/// perch) so the multi-axis seat can compare the axes and callers
+/// can auto-fit the stretch.
+(Offset, double, double, double)? _seatTrussRaw(
   Model3d m,
   Offset pos,
   double rot,
@@ -1039,110 +1173,154 @@ List<List<Offset>> wallSegPieces(Model3d m, Wall3d w, int i) {
   // perpendicular "seats" at nonsense orientations
   bool requireSpan = false,
 }) {
-  // nearest wall seg to point -> (proj on centerline, wall angle,
-  // wall top, the wall — compared when both ends land somewhere)
-  (Offset, double, double, Wall3d)? nearest(Offset p) {
+  // every bearing seg once: (start, unit dir, len, top, key) — wall
+  // top plates AND beam-block top faces share the list
+  final segs = bearingSegs(m);
+  // nearest bearing seg to point -> (proj on centerline, seg angle,
+  // plate top)
+  (Offset, double, double)? nearest(Offset p) {
     var bd = tol;
-    (Offset, double, double, Wall3d)? r;
-    for (final wl in m.walls) {
-      for (var i = 0; i < wl.segs; i++) {
-        final a = Offset(wl.pts[i * 2], wl.pts[i * 2 + 1]);
-        final c = Offset(wl.pts[i * 2 + 2], wl.pts[i * 2 + 3]);
-        final s = c - a;
-        final l2 = s.dx * s.dx + s.dy * s.dy;
-        if (l2 < 1e-9) continue;
-        final t =
-            (((p.dx - a.dx) * s.dx + (p.dy - a.dy) * s.dy) / l2).clamp(
-          0.0,
-          1.0,
-        );
-        final q = Offset(a.dx + s.dx * t, a.dy + s.dy * t);
-        final d = (p - q).distance;
-        if (d < bd) {
-          bd = d;
-          r = (q, math.atan2(s.dy, s.dx), wl.top, wl);
-        }
+    (Offset, double, double)? r;
+    for (final sg in segs) {
+      final t =
+          (((p.dx - sg.$1.dx) * sg.$2.dx + (p.dy - sg.$1.dy) * sg.$2.dy) /
+                  sg.$3)
+              .clamp(0.0, 1.0);
+      final q = Offset(sg.$1.dx + sg.$2.dx * sg.$3 * t,
+          sg.$1.dy + sg.$2.dy * sg.$3 * t);
+      final d = (p - q).distance;
+      if (d < bd) {
+        bd = d;
+        r = (q, math.atan2(sg.$2.dy, sg.$2.dx), sg.$4);
       }
     }
     return r;
   }
 
-  // all wall segs within tol of [p]: (proj on centerline, seg angle,
-  // wall top, distance). An end can sit near a wall INTERSECTION
-  // where the span-parallel seg ties the proper bearing seg — only
-  // looking at the single nearest let the wrong seg poison the pair
-  // (the perch-on-edge mess), so every candidate pair is tried.
+  // all bearing segs within tol of [p]: (proj on centerline, seg angle,
+  // plate top, distance). An end can sit near an INTERSECTION where a
+  // span-parallel seg ties the proper bearing seg — only looking at
+  // the single nearest let the wrong seg poison the pair (the
+  // perch-on-edge mess), so every candidate pair is tried.
   List<(Offset, double, double, double)> hits(Offset p) {
     final out = <(Offset, double, double, double)>[];
-    for (final wl in m.walls) {
-      for (var i = 0; i < wl.segs; i++) {
-        final a = Offset(wl.pts[i * 2], wl.pts[i * 2 + 1]);
-        final c = Offset(wl.pts[i * 2 + 2], wl.pts[i * 2 + 3]);
-        final s = c - a;
-        final l2 = s.dx * s.dx + s.dy * s.dy;
-        if (l2 < 1e-9) continue;
-        final t =
-            (((p.dx - a.dx) * s.dx + (p.dy - a.dy) * s.dy) / l2).clamp(
-          0.0,
-          1.0,
-        );
-        final q = Offset(a.dx + s.dx * t, a.dy + s.dy * t);
-        final d = (p - q).distance;
-        if (d < tol) {
-          out.add((q, math.atan2(s.dy, s.dx), wl.top, d));
-        }
+    for (final sg in segs) {
+      final t =
+          (((p.dx - sg.$1.dx) * sg.$2.dx + (p.dy - sg.$1.dy) * sg.$2.dy) /
+                  sg.$3)
+              .clamp(0.0, 1.0);
+      final q = Offset(sg.$1.dx + sg.$2.dx * sg.$3 * t,
+          sg.$1.dy + sg.$2.dy * sg.$3 * t);
+      final d = (p - q).distance;
+      if (d < tol) {
+        out.add((q, math.atan2(sg.$2.dy, sg.$2.dx), sg.$4, d));
       }
     }
     return out;
   }
 
   final u = Offset(math.cos(rot), math.sin(rot));
-  final l1 = hits(pos - u * span / 2);
-  final l2 = hits(pos + u * span / 2);
-  // spanning = ends bear on plates ACROSS from each other: the line
-  // between bearing projections crosses each plate >30° (|sin|>0.5;
-  // both ends on the same straight wall = a beam along it). Widest
-  // valid pair wins — the truss spans the WHOLE roof before settling
-  // for a perch on a partition. Geometry test, not object identity:
-  // a polygon building's opposite sides share one Wall3d.
-  (Offset, double, double)? best;
-  var bw = 0.0; // WIDEST valid pair within what the truss can carry
-  for (final s1 in l1) {
-    for (final s2 in l2) {
-      final d = s2.$1 - s1.$1;
-      if (d.distance <= math.max(0.3, bw) ||
-          d.distance > span * 1.3) {
+  final e1 = pos - u * span / 2, e2 = pos + u * span / 2;
+  double tAt(Offset a, Offset s, double len, Offset e) =>
+      ((e.dx - a.dx) * s.dx + (e.dy - a.dy) * s.dy) / len;
+  // OUT-TO-OUT solve (Medeek/Chief Architect rule): the bearing walls
+  // dictate the span — the truss STRETCHES to whatever out-to-out the
+  // plate pair holds, the caller fits b.sx to the returned bearing.
+  // Testing fixed ends at pos±u·span/2 was the bug: a 4m truss in a
+  // 5.5m room could NEVER reach the plates, so every axis failed and
+  // the seat fell back to an outward perch. Instead the span LINE
+  // through pos at this axis is intersected with each plate's line —
+  // the intersection params ARE the truss ends, always ON the plates.
+  // t = param along u where the span line crosses the plate line.
+  double? lineCross(Offset a, Offset d) {
+    final den = d.dx * u.dy - d.dy * u.dx;
+    if (den.abs() < 1e-9) return null; // axis ~parallel to the plate
+    return (d.dx * (a.dy - pos.dy) - d.dy * (a.dx - pos.dx)) / den;
+  }
+
+  // fit range: a truss may stretch to 2x its design span (panels grow
+  // via the fink-family auto-count) but never past a 24m single piece
+  final cap = math.min(math.max(span * 2.0, span + 2.0), 24.0);
+  (Offset, double, double, double)? best;
+  var bw = 0.0;
+  var bTop = -double.infinity;
+  for (final sa in segs) {
+    final aA = math.atan2(sa.$2.dy, sa.$2.dx);
+    // this axis must run ~PERPENDICULAR to the plate: >58° — armed
+    // diagonal rots don't produce skewed staggered-bearing spans;
+    // the two wall-family axes always pass on their own family
+    if ((math.sin(rot - aA)).abs() < 0.85) continue;
+    final tA = lineCross(sa.$1, sa.$2);
+    if (tA == null) continue;
+    for (final sb in segs) {
+      if (sa.$5 == sb.$5) continue; // needs two DIFFERENT plates
+      // bearing plates PARALLEL to each other — no corner diagonals
+      if ((math.cos(aA - math.atan2(sb.$2.dy, sb.$2.dx))).abs() < 0.85) {
         continue;
       }
-      final da = math.atan2(d.dy, d.dx);
-      if ((math.sin(da - s1.$2)).abs() <= 0.5 ||
-          (math.sin(da - s2.$2)).abs() <= 0.5) {
+      final tB = lineCross(sb.$1, sb.$2);
+      if (tB == null) continue;
+      final bearing = (tB - tA).abs();
+      if (bearing < 0.3 || bearing > cap) continue;
+      // center the truss BETWEEN its plates — the seat slides along
+      // the span so both ends land on their plate lines
+      final mid = pos + u * ((tA + tB) / 2);
+      // corridor bound: the probe must sit in/near the band this pair
+      // frames — a far-away corridor can't teleport the drop
+      if ((mid - pos).distance > bearing / 2 + tol) continue;
+      // slide along the RIDGE until both endpoints land IN-RUN on
+      // their wall segs — a hover past a wall end clamps to the
+      // nearest real bay (gable-end truss), never an outward perch
+      final rd = sa.$2; // ridge slide direction = plate direction
+      final lA = _lamRange(
+        tAt(sa.$1, sa.$2, sa.$3, pos + u * tA),
+        (rd.dx * sa.$2.dx + rd.dy * sa.$2.dy) / sa.$3,
+      );
+      final lB = _lamRange(
+        tAt(sb.$1, sb.$2, sb.$3, pos + u * tB),
+        (rd.dx * sb.$2.dx + rd.dy * sb.$2.dy) / sb.$3,
+      );
+      final lo = math.max(lA.$1, lB.$1), hi = math.min(lA.$2, lB.$2);
+      if (lo > hi) continue; // no ridge position bears on both
+      final lam = lo > 0 ? lo : (hi < 0 ? hi : 0.0);
+      if (lam.abs() > math.max(span, tol * 2)) continue;
+      // widest pair wins; on a distance TIE the higher plate bears
+      // the truss — a beam laid on a wall top lifts the seat to its
+      // own top, not the wall's
+      final top = math.max(sa.$4, sb.$4);
+      if (bearing < math.max(0.3, bw) - 1e-9) continue;
+      if (best != null && bearing <= bw + 1e-9 && top <= bTop + 1e-9) {
         continue;
       }
-      bw = d.distance;
+      bw = bearing;
+      bTop = top;
+      // ends face whichever way u runs from plate A to plate B
+      final sgn = tB >= tA ? 1.0 : -1.0;
       best = (
-        Offset((s1.$1.dx + s2.$1.dx) / 2, (s1.$1.dy + s2.$1.dy) / 2),
-        da,
-        math.max(s1.$3, s2.$3),
+        mid + rd * lam,
+        math.atan2(u.dy * sgn, u.dx * sgn),
+        top,
+        bw,
       );
     }
   }
   if (best != null) return best;
   if (requireSpan) return null;
   // perch: the closest plate the truss reaches (prefer an end's hit
-  // over the center probe — the truss hangs off that wall)
-  (Offset, double, double)? perch;
+  // over the center probe — the truss hangs off that wall). reach=0:
+  // a perch always loses to any real span in the multi-axis solve
+  (Offset, double, double, double)? perch;
   {
     var pd = tol;
-    for (final h in [...l1, ...l2]) {
+    for (final h in [...hits(e1), ...hits(e2)]) {
       if (h.$4 < pd) {
         pd = h.$4;
-        perch = (h.$1, h.$2, h.$3);
+        perch = (h.$1, h.$2, h.$3, 0.0);
       }
     }
     if (perch == null) {
       final near = nearest(pos);
-      if (near != null) perch = (near.$1, near.$2, near.$3);
+      if (near != null) perch = (near.$1, near.$2, near.$3, 0.0);
     }
   }
   if (perch == null) return null;
@@ -1152,7 +1330,18 @@ List<List<Offset>> wallSegPieces(Model3d m, Wall3d w, int i) {
   // the seat doesn't flip 180° while dragging
   var r = perch.$2 + math.pi / 2;
   if (math.cos(r - rot) < 0) r += math.pi;
-  return (perch.$1, r, perch.$3);
+  // INWARD BIAS: when the armed rot is ~parallel to the plate the
+  // hemisphere is ambiguous — a perch on an exterior wall should hang
+  // INTO the building, not cantilever past the wall face. Prefer the
+  // far end with more wall support nearby.
+  if ((math.cos(r - rot)).abs() < 0.35) {
+    final uu = Offset(math.cos(r), math.sin(r));
+    if (nearestWallDist(m, perch.$1 - uu * span / 2) <
+        nearestWallDist(m, perch.$1 + uu * span / 2)) {
+      r += math.pi;
+    }
+  }
+  return (perch.$1, r, perch.$3, 0.0);
 }
 
 /// Public seat: raw bearing solve, then RIDGE-GRID SNAP — the seat
@@ -1165,7 +1354,13 @@ List<List<Offset>> wallSegPieces(Model3d m, Wall3d w, int i) {
 /// deliberate non-bay placements still work. [ignore] = the block
 /// being moved/pasted — it's in m.blocks already and must not anchor
 /// the grid to itself.
-(Offset, double, double)? seatTrussOnWalls(
+/// Returns (position, rotation, baseZ, bearing): `baseZ` = plate top
+/// + [kTrussSeatLift] so the bottom chord's UNDERSIDE rests flush on
+/// the plate (a wall top or a beam's upper face). `bearing` is the
+/// out-to-out plate distance the seat spans — callers auto-fit the
+/// truss stretch to it via [trussFitSx] so both ends actually reach
+/// the plates (0 on a perch: leave sx alone).
+(Offset, double, double, double)? seatTrussOnWalls(
   Model3d m,
   Offset pos,
   double rot,
@@ -1174,16 +1369,57 @@ List<List<Offset>> wallSegPieces(Model3d m, Wall3d w, int i) {
   Block3d? ignore,
   bool requireSpan = false,
 }) {
-  final seat = _seatTrussRaw(
-    m,
-    pos,
-    rot,
-    span,
-    tol: tol,
-    requireSpan: requireSpan,
-  );
+  // TWO-OPTION hover: solve the drop on EVERY orthogonal span axis —
+  // the armed rot AND the perpendicular of each wall-direction family
+  // — so a rectilinear building always evaluates "span across the
+  // horizontal walls" AND "span across the vertical walls". Only
+  // trying the block's stored rot is what used to perch a truss
+  // hanging diagonally off whatever wall sat under the cursor. Any
+  // real two-plate span beats a perch; among spans the SHORTER bearing
+  // distance wins — that's the axis real trusses frame; remaining
+  // ties go to the seat nearest the pointer.
+  double fold(double a) {
+    var r = a % math.pi;
+    return r < 0 ? r + math.pi : r;
+  }
+
+  final cands = <double>{fold(rot), fold(rot + math.pi / 2)};
+  for (final sg in bearingSegs(m)) {
+    // the SPAN axis that bears on this plate family runs across it
+    cands.add(fold(math.atan2(sg.$2.dy, sg.$2.dx) + math.pi / 2));
+  }
+  (Offset, double, double, double)? seat;
+  for (final cand in cands) {
+    final s = _seatTrussRaw(
+      m,
+      pos,
+      cand,
+      span,
+      tol: tol,
+      requireSpan: requireSpan,
+    );
+    if (s == null) continue;
+    // pick order: a real span beats a perch (reach 0); among spans
+    // the SHORTER bearing distance wins — trusses frame the short
+    // direction of a room (the perpendicular axis the hover was
+    // missing). Ties + perches break to the seat nearest the pointer.
+    final sSpan = s.$4 > 0, oSpan = seat?.$4 != null && seat!.$4 > 0;
+    if (seat == null ||
+        (sSpan && !oSpan) ||
+        (sSpan &&
+            oSpan &&
+            (s.$4 < seat.$4 - 1e-9 ||
+                ((s.$4 - seat.$4).abs() <= 1e-9 &&
+                    (s.$1 - pos).distance <
+                        (seat.$1 - pos).distance - 1e-9))) ||
+        (!sSpan &&
+            !oSpan &&
+            (s.$1 - pos).distance < (seat.$1 - pos).distance - 1e-9)) {
+      seat = s;
+    }
+  }
   if (seat == null) return null;
-  final (c, r, top) = seat;
+  final (c, r, top) = (seat.$1, seat.$2, seat.$3);
   final rd = Offset(-math.sin(r), math.cos(r)); // along the ridge
   final perp = Offset(math.cos(r), math.sin(r)); // along the span
   final v = c.dx * perp.dx + c.dy * perp.dy;
@@ -1198,7 +1434,10 @@ List<List<Offset>> wallSegPieces(Model3d m, Wall3d w, int i) {
           ((b.x * perp.dx + b.y * perp.dy) - v).abs() < 0.6)
         b.x * rd.dx + b.y * rd.dy,
   ]..sort();
-  if (us.isEmpty) return seat;
+  // the returned bz = plate top + the bottom-chord lift — the chord
+  // underside bears flush on the plate instead of sinking into it
+  final seat3 = (seat.$1, seat.$2, seat.$3 + kTrussSeatLift, seat.$4);
+  if (us.isEmpty) return seat3;
   final sp = m.roof.trussSpacing > 0 ? m.roof.trussSpacing : 1.5;
   var ref = us.first, bd = (u - ref).abs();
   for (final q in us) {
@@ -1209,7 +1448,7 @@ List<List<Offset>> wallSegPieces(Model3d m, Wall3d w, int i) {
     }
   }
   var n = ((u - ref) / sp).round();
-  if ((u - (ref + n * sp)).abs() > sp * 0.55) return seat; // free bay
+  if ((u - (ref + n * sp)).abs() > sp * 0.55) return seat3; // free bay
   bool occupied(double uu) =>
       us.any((q) => (q - uu).abs() < math.min(0.35, sp * 0.45));
   // walk outward in the cursor's direction to the first free cell
@@ -1218,9 +1457,9 @@ List<List<Offset>> wallSegPieces(Model3d m, Wall3d w, int i) {
   while (occupied(ref + k * sp) && hops++ < 8) {
     k += dir;
   }
-  if (occupied(ref + k * sp)) return seat; // crowded line: keep free
+  if (occupied(ref + k * sp)) return seat3; // crowded line: keep free
   final du = ref + k * sp - u;
-  if (du.abs() < 1e-6) return seat;
+  if (du.abs() < 1e-6) return seat3;
   // the snapped point must still bear — re-seat at it and keep the
   // result only when it lands on the same wall family (rot + top)
   final re = _seatTrussRaw(
@@ -1236,10 +1475,17 @@ List<List<Offset>> wallSegPieces(Model3d m, Wall3d w, int i) {
   if (re == null ||
       math.cos(2 * (re.$2 - r)) < 0.825 ||
       (re.$3 - top).abs() > 0.6) {
-    return seat;
+    return seat3;
   }
-  return re;
+  return (re.$1, re.$2, re.$3 + kTrussSeatLift, re.$4);
 }
+
+/// Out-to-out auto-fit (Medeek/Chief Architect rule): the wall pair
+/// dictates the truss span — stretch the block so its ends cover the
+/// seat's returned bearing exactly. bearing<=0 (a single-wall perch)
+/// leaves the stretch alone.
+double trussFitSx(double scale, double defW, double bearing) =>
+    (bearing / (defW * scale)).clamp(0.25, 8.0);
 
 /// Does [b] count as part of a ROOF (fields, purlins, tags, sheets,
 /// takeoff)? Only when it's actually bearing: seated on wall top
@@ -1332,7 +1578,7 @@ void migrateTrusses(Model3d m) {
     if (def == null) continue;
     final span = def.w * b.sx * b.scale;
     final p = Offset(b.x, b.y);
-    (Offset, double, double)? seat;
+    (Offset, double, double, double)? seat;
     // 1) join the dominant roof: a real span at the dominant rot —
     //    |cos| because a span solve returns atan2 raw and truss
     //    orientation is modulo pi. Applies even to "bearing" trusses:
@@ -1375,6 +1621,9 @@ void migrateTrusses(Model3d m) {
     if (r2 < 0) r2 += math.pi;
     b.rot = r2;
     b.bz = seat.$3;
+    if (seat.$4 > 0) {
+      b.sx = trussFitSx(b.scale, def.w, seat.$4); // reach both plates
+    }
   }
   final lim = math.min(
     0.45,
@@ -2175,6 +2424,14 @@ final kCadBlocks = <CadBlock>[
     [Offset(-0.15, 0), Offset(0.15, 0)],
     [Offset(0, -0.15), Offset(0, 0.15)],
   ]),
+  // RC beam — runs horizontally along X; drop it ON a wall top (or
+  // free-lift it) and trusses seat on its top like a wall plate.
+  // 0.20×0.30 is the PH "200×300" floor beam; the inspector's NSCP
+  // panel sizes it to the span (Table 409.3.1.1 L/16).
+  CadBlock('beam', 'Beam 0.20×0.30', 'Site', 4.0, 0.20, 0.30, [
+    _rect(4.0, 0.20),
+    [const Offset(-2.0, 0), const Offset(2.0, 0)],
+  ]),
   // standalone footing pads — plan symbol = square + X cross; the 3D
   // pad renders BURIED (top at the block base, body below) so placing
   // at base 0 puts concrete under the floor. Design calc treats a pad
@@ -2215,6 +2472,18 @@ final kCadBlocks = <CadBlock>[
     [const Offset(0.05, -0.09), const Offset(0.05, 0.09)],
     [const Offset(-1.0, -0.09), const Offset(-0.25, 0.09)],
     [const Offset(1.0, -0.09), const Offset(0.25, 0.09)],
+  ]),
+  // the user's second SketchUp model (truss (1).skp -> dbl_truss.obj):
+  // a DOUBLE mono-pitch truss — two flat frames side by side filling
+  // the 0.18 m depth, top chord rising heel->high end. Parametric
+  // like the other trusses (plan symbol = same chord+web ticks).
+  CadBlock('truss-dbl', 'Roof truss 4.0m (double)', 'Site', 3.97, 0.18, 0.85, [
+    _rect(3.97, 0.18),
+    [const Offset(-1.985, 0), const Offset(1.985, 0)],
+    [const Offset(-0.99, -0.09), const Offset(-0.99, 0.09)],
+    [const Offset(-0.33, -0.09), const Offset(-0.33, 0.09)],
+    [const Offset(0.33, -0.09), const Offset(0.33, 0.09)],
+    [const Offset(0.99, -0.09), const Offset(0.99, 0.09)],
   ]),
   CadBlock('tree', 'Tree canopy 3.0', 'Site', 1.5, 1.5, 0, [
     _arc(0, 0, 0.75, 0, 360, 16),
@@ -2356,6 +2625,7 @@ const kKenneyMeshMap = {
   'col-sq': 'columnSq',
   'col-rd': 'columnRd',
   'truss': 'wh_truss', // user's SketchUp model (tool/skp2obj.rb)
+  'truss-dbl': 'dbl_truss', // user's 2nd SketchUp model (double mono-pitch)
   'tree': 'treeOak',
   'shrub': 'shrubBush',
   'car': 'carSedan',
@@ -2689,16 +2959,48 @@ int _tinted(int argb, int tint) {
       ch(argb & 0xFF, tint & 0xFF);
 }
 
+/// Floors this column's footing supports = its own level plus each
+/// column directly above it in the same stack (within 0.4 m plan
+/// distance at a higher base — the same 0.4/0.3 test the design
+/// checks and the footing apply-all use). A lone/roof-only column
+/// counts as 1 floor per NSCP 2015 Table 305-1 note 3.
+int columnStackFloors(Model3d m, Block3d b) {
+  var n = 1, lvl = b.bz;
+  for (;;) {
+    var nz = double.infinity;
+    for (final q in m.blocks) {
+      if ((q.def == 'col-sq' || q.def == 'col-rd') &&
+          q.bz > lvl + 0.3 &&
+          q.bz < nz &&
+          (Offset(q.x, q.y) - Offset(b.x, b.y)).distance < 0.4) {
+        nz = q.bz;
+      }
+    }
+    if (!nz.isFinite) return n;
+    n++;
+    lvl = nz;
+  }
+}
+
+/// The footing embedment this column actually uses: manual `footD`
+/// wins; otherwise NSCP Table 305-1 for the floors its stack carries.
+/// Every consumer (render, takeoff, checks, sheets) resolves through
+/// this so they always agree on the same depth.
+double blockFootingDepth(Model3d m, Block3d b) =>
+    footingDepth(b.footD, columnStackFloors(m, b));
+
 /// The column footing pad (buried at footD) + pedestal stem — part of
 /// the block's own faces so 3D picking, render groups and the cache all
 /// treat it as one selectable object. Concrete colors stay untinted.
-List<Face3> blockFootingFaces(Block3d b, CadBlock def) {
+/// [floors] is the stack's supported-floor count (Table 305-1) —
+/// callers with the model pass `columnStackFloors`, else 1.
+List<Face3> blockFootingFaces(Block3d b, CadBlock def, {int floors = 1}) {
   if (!b.footing || (b.def != 'col-sq' && b.def != 'col-rd')) {
     return const [];
   }
   final sec = def.w * b.sx * b.scale;
   final f = footingFor(sec, b.footW);
-  final d = footingDepth(b.footD);
+  final d = footingDepth(b.footD, floors);
   final hw = f.w / 2;
   final out = <Face3>[
     ..._polyFaces(
@@ -2788,15 +3090,54 @@ List<Face3> _memberBox(
 }
 
 /// A def id belongs to the roof-truss family ('truss' parametric
-/// fink, 'truss-sgl' single king-post) — seating, roof fields, sheet
-/// symbols and takeoff treat them the same.
+/// fink, 'truss-sgl' single king-post, 'truss-dbl' double mono-pitch
+/// from the user's second SketchUp model) — seating, roof fields,
+/// sheet symbols and takeoff treat them the same.
 bool isTrussDef(String id) => id.startsWith('truss');
 
+/// A 'beam' block — an RC member running horizontally that TRUSSES
+/// CAN BEAR ON (its top acts as a plate in the seat solve, same as a
+/// wall top). Sized per NSCP 2015 Table 409.3.1.1 by default.
+bool isBeamDef(String id) => id == 'beam';
+
+/// The bay count a placed truss actually builds: an explicit `panels`
+/// (inspector stepper) wins; 0 = AUTO follows the STRETCHED span —
+/// lengthening a truss adds web members at ~1.0 m/bay (the stock
+/// 4.0 m/4-bay pitch) instead of thinning out a fixed fink. Same
+/// 2..12 clamp as the manual count.
+int trussPanelCount(Block3d b, CadBlock def) {
+  if (b.panels >= 2) return b.panels.clamp(2, 12);
+  return (def.w * b.sx * b.scale / 1.0).round().clamp(2, 12);
+}
+
+/// Fink-family node layout (TRA quarter/third rule): for [n] bays on
+/// a span [-s..s] pick the odd bottom-panel count P — 3=fink "4/3",
+/// 5=double fink "6/5", 7=triple fink "8/7", then keep odd-stepping
+/// (9,11) so a stretched truss keeps gaining W cells — real practice
+/// subdivides the triangle rather than adding arbitrary verticals.
+/// Returns (top node xs at i/(P+1) fractions, bottom node xs at i/P).
+/// The zigzag webs then connect top_i->bot_i (compression stub) and
+/// bot_i->top_{i+1} (tension diagonal) — the letter W eave to eave.
+(int, List<double>, List<double>) finkNodes(int n, double span) {
+  final p = n <= 4 ? 3 : (n <= 6 ? 5 : ((n + 1) ~/ 2) * 2 - 1);
+  final s = span / 2;
+  return (
+    p,
+    [for (var i = 1; i <= p; i++) -s + span * i / (p + 1)],
+    [for (var i = 1; i < p; i++) -s + span * i / p],
+  );
+}
+
 /// The parametric roof-truss mesh in def-local space: bottom chord +
-/// two top chords + a vertical at every interior panel point +
-/// alternating Warren diagonals. [panels] = web bays (0 -> auto 4).
+/// two top chords + fink-family W webbing (stubs top_i->bot_i,
+/// diagonals bot_i->top_{i+1} — see [finkNodes]). [panels] = web bays
+/// (0 -> auto 4); larger bay counts step the pattern single->double->
+/// triple fink the way real trusses subdivide with span.
 /// [single] switches to the king-post layout: thin single members,
-/// center post + two struts — the 'truss-sgl' variant.
+/// center post + two struts — the 'truss-sgl' variant. [dbl] builds
+/// the user-supplied 'truss (1).skp' design ('truss-dbl'): a DOUBLE
+/// mono-pitch truss — two identical flat frames filling the depth —
+/// whose top chord rises heel->high end toward +X.
 /// Replaces the static wh_truss OBJ for placed trusses so the member
 /// layout follows the block's panel count — the inspector stepper
 /// and the plan symbol both read it.
@@ -2806,43 +3147,98 @@ List<Face3> trussLocalFaces(
   double depth,
   double rise, {
   bool single = false,
+  bool dbl = false,
 }) {
   final n = (panels < 2 ? 4 : panels).clamp(2, 12);
+  if (dbl) return _dblTrussFaces(n, span, depth, rise);
   final chord = single ? 0.08 : 0.10, web = single ? 0.06 : 0.075;
   const wood = 0xFF8D6E63, woodDark = 0xFF6D4C41;
+  // members are lumber on edge — ~0.05 m into the roof plane, NOT the
+  // truss footprint depth (def.d 0.18): full-depth member boxes drew
+  // their front AND back plates as two parallel flat trusses
+  final dep = math.min(depth, 0.05);
   final s = span / 2;
   double zt(double x) => rise * (1 - (x / s).abs());
   final out = <Face3>[
-    ..._memberBox(-s, 0, s, 0, chord, depth, wood),
-    ..._memberBox(-s, 0, 0, rise, chord, depth, wood),
-    ..._memberBox(0, rise, s, 0, chord, depth, wood),
+    ..._memberBox(-s, 0, s, 0, chord, dep, wood),
+    ..._memberBox(-s, 0, 0, rise, chord, dep, wood),
+    ..._memberBox(0, rise, s, 0, chord, dep, wood),
   ];
   if (single) {
     // king-post: center post + struts from the quarter-points of the
     // bottom chord up to the rafter at the eighth-point
-    out.addAll(_memberBox(0, 0, 0, rise, web, depth * 0.7, woodDark));
+    out.addAll(_memberBox(0, 0, 0, rise, web, dep * 0.7, woodDark));
     out.addAll(
-      _memberBox(-s * 0.5, 0, -s * 0.25, zt(s * 0.25), web, depth * 0.7, wood),
+      _memberBox(-s * 0.5, 0, -s * 0.25, zt(s * 0.25), web, dep * 0.7, wood),
     );
     out.addAll(
-      _memberBox(s * 0.5, 0, s * 0.25, zt(s * 0.25), web, depth * 0.7, wood),
+      _memberBox(s * 0.5, 0, s * 0.25, zt(s * 0.25), web, dep * 0.7, wood),
     );
     return out;
   }
-  var up = true;
-  for (var i = 1; i < n; i++) {
-    final x = -s + span * i / n;
-    out.addAll(_memberBox(x, 0, x, zt(x), web, depth * 0.7, woodDark));
-    // zigzag diagonal inside bay i-1 -> i (alternating fall direction)
-    final x0 = -s + span * (i - 1) / n;
-    if (up) {
-      out.addAll(_memberBox(x0, 0, x, zt(x), web, depth * 0.7, wood));
-    } else {
-      out.addAll(_memberBox(x0, zt(x0), x, 0, web, depth * 0.7, wood));
+  // fink-family W webbing: compression stubs (top_i -> bot_i) and
+  // tension diagonals (bot_i -> top_{i+1}) zigzag eave to eave — the
+  // real '4 over 3' / '6 over 5' / '8 over 7' pattern
+  final (p, tops, bots) = finkNodes(n, span);
+  for (var i = 0; i < bots.length; i++) {
+    final bx = bots[i], t1 = tops[i], t2 = tops[i + 1];
+    out.addAll(_memberBox(t1, zt(t1), bx, 0, web, dep * 0.7, woodDark));
+    out.addAll(_memberBox(bx, 0, t2, zt(t2), web, dep * 0.7, wood));
+    // double-fink and up (p >= 5): a vertical web at each bottom
+    // panel joint rises to the rafter — the Double Howe (KK) /
+    // Triple Fan / KKK families all carry these posts, so a
+    // stretched truss gains BOTH the extra W cells and the posts
+    if (p >= 5) {
+      out.addAll(_memberBox(bx, 0, bx, zt(bx), web, dep * 0.7, woodDark));
     }
-    up = !up;
   }
   return out;
+}
+
+/// The 'truss-dbl' frame: ONE mono-pitch plate (bottom chord, top
+/// chord rising heel->high end, end posts, fink-family zigzag
+/// webbing) — called twice at ±y to build the supplied skp's two
+/// parallel frames.
+List<Face3> _dblTrussFaces(int n, double span, double depth, double rise) {
+  const wood = 0xFF8D6E63, woodDark = 0xFF6D4C41;
+  const chord = 0.10, web = 0.06, plate = 0.06;
+  final s = span / 2;
+  final zlo = rise * 0.18; // heel height measured off the skp export
+  double zt(double x) => zlo + (rise - zlo) * (x + s) / span;
+  List<Face3> frame() {
+    final out = <Face3>[
+      ..._memberBox(-s, 0, s, 0, chord, plate, wood),
+      ..._memberBox(-s, zlo, s, rise, chord, plate, wood),
+      ..._memberBox(-s, 0, -s, zlo, web, plate * 0.8, woodDark),
+      ..._memberBox(s, 0, s, rise, web, plate * 0.8, woodDark),
+    ];
+    // mono-pitch webbing: the fink-family zigzag — stubs top_i->bot_i,
+    // diagonals bot_i->top_{i+1} — a proper fan layout on one slope;
+    // p >= 5 adds the same vertical posts as the gabled variant
+    final (p, tops, bots) = finkNodes(n, span);
+    for (var i = 0; i < bots.length; i++) {
+      final bx = bots[i], t1 = tops[i], t2 = tops[i + 1];
+      out.addAll(
+        _memberBox(t1, zt(t1), bx, 0, web, plate * 0.8, woodDark),
+      );
+      out.addAll(_memberBox(bx, 0, t2, zt(t2), web, plate * 0.8, wood));
+      if (p >= 5) {
+        out.addAll(
+          _memberBox(bx, 0, bx, zt(bx), web, plate * 0.8, woodDark),
+        );
+      }
+    }
+    return out;
+  }
+
+  // the skp's two ~0.09 m frames side by side in the 0.18 depth —
+  // a visible gap keeps the "double" reading distinct from 'single'
+  final off = depth / 2 - plate / 2 - 0.01;
+  List<Face3> at(double dy) => [
+    for (final f in frame())
+      Face3([for (final p in f.v) [p[0], p[1] + dy, p[2]]], f.n, f.argb),
+  ];
+  return [...at(-off), ...at(off)];
 }
 
 /// Chord vs web member lengths (m) of the parametric truss — mirrors
@@ -2854,8 +3250,31 @@ List<Face3> trussLocalFaces(
   double span,
   double rise, {
   bool single = false,
+  bool dbl = false,
 }) {
   final n = (panels < 2 ? 4 : panels).clamp(2, 12);
+  if (dbl) {
+    // mono-pitch frame x2 plates — same fink zigzag webs + the
+    // vertical posts (p >= 5) the mesh draws
+    final s = span / 2, zlo = rise * 0.18;
+    double zt(double x) => zlo + (rise - zlo) * (x + s) / span;
+    var web = zlo + rise; // the two end posts
+    final (p, tops, bots) = finkNodes(n, span);
+    for (var i = 0; i < bots.length; i++) {
+      web += math.sqrt(
+        (tops[i] - bots[i]) * (tops[i] - bots[i]) +
+            zt(tops[i]) * zt(tops[i]),
+      );
+      web += math.sqrt(
+        (tops[i + 1] - bots[i]) * (tops[i + 1] - bots[i]) +
+            zt(tops[i + 1]) * zt(tops[i + 1]),
+      );
+      if (p >= 5) web += zt(bots[i]); // vertical post to the rafter
+    }
+    final chord =
+        span + math.sqrt(span * span + (rise - zlo) * (rise - zlo));
+    return (chord * 2, web * 2);
+  }
   final s = span / 2;
   double zt(double x) => rise * (1 - (x / s).abs());
   if (single) {
@@ -2865,21 +3284,65 @@ List<Face3> trussLocalFaces(
     );
     return (span + 2 * math.sqrt(s * s + rise * rise), rise + 2 * strut());
   }
+  // fink-family W: stub (top_i -> bot_i) + diagonal (bot_i -> top_{i+1})
+  // + the vertical post at each bottom joint once p >= 5
   var web = 0.0;
-  var up = true;
-  for (var i = 1; i < n; i++) {
-    final x = -s + span * i / n;
-    final x0 = -s + span * (i - 1) / n;
-    web += zt(x); // vertical
+  final (p, tops, bots) = finkNodes(n, span);
+  for (var i = 0; i < bots.length; i++) {
     web += math.sqrt(
-      (x - x0) * (x - x0) + (up ? zt(x) : zt(x0)) * (up ? zt(x) : zt(x0)),
-    ); // diagonal
-    up = !up;
+      (tops[i] - bots[i]) * (tops[i] - bots[i]) +
+          zt(tops[i]) * zt(tops[i]),
+    );
+    web += math.sqrt(
+      (tops[i + 1] - bots[i]) * (tops[i + 1] - bots[i]) +
+          zt(tops[i + 1]) * zt(tops[i + 1]),
+    );
+    if (p >= 5) web += zt(bots[i]); // vertical post to the rafter
   }
   return (span + 2 * math.sqrt(s * s + rise * rise), web);
 }
 
-List<Face3> blockFaces(Block3d b, CadBlock def) {
+/// Member CENTERLINES of a placed truss in world space — one segment
+/// per member (chords + webs), end-to-end. The 3D ghost and the
+/// catalog thumb draw THESE instead of each box member's plate
+/// outline, which reads as a doubled pair of lines. Same members the
+/// solid mesh, plan symbol and takeoff use.
+List<List<List<double>>> trussMemberLines(Block3d b, CadBlock def) {
+  final local = trussLocalFaces(
+    trussPanelCount(b, def),
+    def.w,
+    def.d,
+    def.height,
+    single: def.id == 'truss-sgl',
+    dbl: def.id == 'truss-dbl',
+  );
+  final c = math.cos(b.rot), s = math.sin(b.rot);
+  List<double> toWorld(List<double> p) => [
+    b.x + (p[0] * b.sx * c - p[1] * b.sy * s) * b.scale,
+    b.y + (p[0] * b.sx * s + p[1] * b.sy * c) * b.scale,
+    p[2] * b.sz * b.scale + b.bz,
+  ];
+  return [
+    for (final f in local)
+      // -Y side plate = one face per member; its midpoints at the two
+      // member ends give the member's centerline
+      if (f.n[1] < -0.9)
+        [
+          toWorld([
+            (f.v[0][0] + f.v[3][0]) / 2,
+            (f.v[0][1] + f.v[3][1]) / 2,
+            (f.v[0][2] + f.v[3][2]) / 2,
+          ]),
+          toWorld([
+            (f.v[1][0] + f.v[2][0]) / 2,
+            (f.v[1][1] + f.v[2][1]) / 2,
+            (f.v[1][2] + f.v[2][2]) / 2,
+          ]),
+        ],
+  ];
+}
+
+List<Face3> blockFaces(Block3d b, CadBlock def, {int floors = 1}) {
   final out = <Face3>[];
   if (def.id.startsWith('ftg-')) {
     // standalone footing pad: buried, TOP face at the block base so
@@ -2909,11 +3372,12 @@ List<Face3> blockFaces(Block3d b, CadBlock def) {
   // gets the single-member king-post mesh
   final local = isTrussDef(def.id)
       ? trussLocalFaces(
-          b.panels,
+          trussPanelCount(b, def),
           def.w,
           def.d,
           def.height,
           single: def.id == 'truss-sgl',
+          dbl: def.id == 'truss-dbl',
         )
       : blockMeshes[def.id];
   if (local != null && local.isNotEmpty) {
@@ -2934,16 +3398,25 @@ List<Face3> blockFaces(Block3d b, CadBlock def) {
         ),
     ]);
   } else if (def.height > 0) {
-    out.addAll(
-      _polyFaces(
-        blockFootprint(b, def),
-        0,
-        def.height * b.scale,
-        _tinted(0xFFBCAAA4, b.tint),
-      ),
-    );
+    // sz scales the extrusion like the mesh path does — the
+    // inspector's Height field writes b.sz and generic boxes used to
+    // ignore it (a beam couldn't change depth); base honors b.bz so
+    // lifted boxes stop rendering at ground
+    final fp = blockFootprint(b, def);
+    final col = _tinted(isBeamDef(def.id) ? 0xFF9E9E9E : 0xFFBCAAA4, b.tint);
+    out.addAll(_polyFaces(fp, b.bz, b.bz + def.height * b.sz * b.scale, col));
+    if (isBeamDef(def.id)) {
+      // closed solid — a lifted beam's underside must render
+      out.add(
+        Face3(
+          [for (final p in fp) [p.dx, p.dy, b.bz]],
+          const [0, 0, -1],
+          col,
+        ),
+      );
+    }
   }
-  out.addAll(blockFootingFaces(b, def));
+  out.addAll(blockFootingFaces(b, def, floors: floors));
   return out;
 }
 
@@ -3040,7 +3513,9 @@ Offset _rotP(Offset p, double a) {
 /// A block's polylines transformed into plan coordinates
 /// (per-axis stretch → scale → rotate → translate).
 List<List<Offset>> blockLines(Block3d b, CadBlock def) => [
-  for (final l in def.id == 'truss' ? _trussPlanLines(b.panels, def) : def.lines)
+  for (final l in def.id == 'truss' || def.id == 'truss-dbl'
+      ? _trussPlanLines(trussPanelCount(b, def), def)
+      : def.lines)
     [
       for (final p in l)
         _rotP(Offset(p.dx * b.sx, p.dy * b.sy) * b.scale, b.rot) +
@@ -3048,9 +3523,10 @@ List<List<Offset>> blockLines(Block3d b, CadBlock def) => [
     ],
 ];
 
-/// The truss PLAN symbol follows the same bay count as the 3D mesh —
-/// outline + bottom chord + a vertical tick at every panel point +
-/// alternating diagonals, so the sheet reads the real member layout.
+/// The truss PLAN symbol follows the same fink-family node layout as
+/// the 3D mesh — outline + bottom chord + a tick at every bottom-
+/// chord web node + the W zigzag diagonals, so the sheet reads the
+/// real member layout.
 List<List<Offset>> _trussPlanLines(int panels, CadBlock def) {
   final n = (panels < 2 ? 4 : panels).clamp(2, 12);
   final s = def.w / 2, hd = def.d / 2;
@@ -3058,15 +3534,14 @@ List<List<Offset>> _trussPlanLines(int panels, CadBlock def) {
     _rect(def.w, def.d),
     [Offset(-s, 0), Offset(s, 0)],
   ];
-  for (var i = 1; i < n; i++) {
-    final x = -s + def.w * i / n;
-    out.add([Offset(x, -hd), Offset(x, hd)]);
-    final x0 = -s + def.w * (i - 1) / n;
-    out.add(
-      i.isOdd
-          ? [Offset(x0, -hd), Offset(x, hd)]
-          : [Offset(x0, hd), Offset(x, -hd)],
-    );
+  final (_, tops, bots) = finkNodes(n, def.w);
+  for (var i = 0; i < bots.length; i++) {
+    final bx = bots[i];
+    out.add([Offset(bx, -hd), Offset(bx, hd)]);
+    // the two webs meeting at this bottom node, projected as plan
+    // diagonals — reads as the W pattern on the sheet
+    out.add([Offset(tops[i], -hd), Offset(bx, hd)]);
+    out.add([Offset(bx, -hd), Offset(tops[i + 1], hd)]);
   }
   return out;
 }
@@ -3158,7 +3633,7 @@ List<Face3> modelFaces(Model3d m) {
     if (def == null) continue;
     // blockFaces includes the footing pad + pedestal stem, so the
     // footing is part of the block's group: render AND pick it as one
-    addGroup(blockFaces(b, def));
+    addGroup(blockFaces(b, def, floors: columnStackFloors(m, b)));
   }
   // C-purlin channels ride on the truss top chords — derived geometry
   // like the RC bands, not pickable parts; one run per group
@@ -3361,10 +3836,11 @@ class RoofField {
   ];
 
   /// Purlin rows at spec spacing: eave->ridge on both slopes. Bays
-  /// divide the slope so spacing never exceeds the spec; the ridge
-  /// line is shared.
+  /// divide the slope so spacing never exceeds the spec; the apex
+  /// carries a flanking PAIR (half a bay out each side), so each
+  /// slope holds bays+1 rows.
   int purlinBays(RoofSpec s) => math.max(1, (slope / s.purlinSpace).ceil());
-  int purlinRows(RoofSpec s) => 2 * purlinBays(s) + 1;
+  int purlinRows(RoofSpec s) => 2 * purlinBays(s) + 2;
   double purlinLm(RoofSpec s) => purlinRows(s) * runLen;
   /// 6m commercial lengths, lapped over supports — per row.
   int purlinPcs(RoofSpec s) => purlinRows(s) * (runLen / 6.0).ceil();
@@ -3420,22 +3896,52 @@ List<RoofField> roofFields(Model3d m) {
       void emit() {
         if (run.isEmpty) return;
         var cx = 0.0, cy = 0.0;
+        // ENVELOPE half/rise over the run's own trusses — after
+        // out-to-out auto-fit different bays can carry different
+        // stretches, and a field plane solved from b0 alone bores the
+        // shared purlin runs THROUGH the taller trusses' chords
+        var hlf = 0.0, rs = 0.0;
         for (final t in run) {
           cx += t.$1.x;
           cy += t.$1.y;
+          final d = cadBlock(t.$1.def);
+          if (d == null) continue;
+          hlf = math.max(hlf, d.w * t.$1.sx * t.$1.scale / 2);
+          rs = math.max(rs, d.height * t.$1.sz * t.$1.scale);
         }
+        if (hlf <= 0) hlf = half;
+        if (rs <= 0) rs = rise;
         final cent = Offset(cx / run.length, cy / run.length);
-        final u0 = run.first.u - (cent.dx * rd.dx + cent.dy * rd.dy) - 0.5;
-        final u1 = run.last.u - (cent.dx * rd.dx + cent.dy * rd.dy) + 0.5;
+        // ridge follows the RUN's real first->last direction, not
+        // b0's stored rot — a hand-placed jitter on the first truss
+        // used to tilt the whole purlin set off the truss line
+        var rdf = rd;
+        if (run.length > 1) {
+          final dd = Offset(
+            run.last.$1.x - run.first.$1.x,
+            run.last.$1.y - run.first.$1.y,
+          );
+          if (dd.distance > 1e-6) {
+            rdf = dd / dd.distance;
+            if (rdf.dx * rd.dx + rdf.dy * rd.dy < 0) rdf = -rdf;
+          }
+        }
+        final perpf = Offset(rdf.dy, -rdf.dx);
+        double uOf(Block3d b) => b.x * rdf.dx + b.y * rdf.dy;
+        final cu = cent.dx * rdf.dx + cent.dy * rdf.dy;
+        final u0 =
+            run.map((t) => uOf(t.$1)).reduce(math.min) - cu - 0.5;
+        final u1 =
+            run.map((t) => uOf(t.$1)).reduce(math.max) - cu + 0.5;
         out.add(
           RoofField(
-            ridge: rd,
-            perp: perp,
+            ridge: rdf,
+            perp: perpf,
             center: cent,
             u0: u0,
             u1: u1,
-            half: half,
-            rise: rise,
+            half: hlf,
+            rise: rs,
             count: run.length,
             trusses: [for (final t in run) t.$1],
           ),
@@ -3465,6 +3971,78 @@ List<RoofField> roofFields(Model3d m) {
       line.add(t);
     }
     flush();
+  }
+  // MERGE pass — one roof fragmented by the rot buckets (hand-placed
+  // jitter) or a sparse unplaced bay must still read as ONE run so the
+  // C-purlins connect truss to truss: same roof line (parallel ridge +
+  // same v offset + same bearing level) whose truss-run gap fits inside
+  // a purlin span merges into one field. A real wing stays split —
+  // different ridge direction, different roof line, different level,
+  // or a gap wider than a purlin can plausibly reach.
+  final connectTol = math.max(4.5, m.roof.trussSpacing * 2.0);
+  for (var go = true; go;) {
+    go = false;
+    outer:
+    for (var i = 0; i < out.length; i++) {
+      for (var j = i + 1; j < out.length; j++) {
+        final a = out[i], b = out[j];
+        final dot = a.ridge.dx * b.ridge.dx + a.ridge.dy * b.ridge.dy;
+        if (dot.abs() < 0.978) continue; // ridges not parallel (~12 deg)
+        final lineTol = math.max(0.6, math.max(a.half, b.half) * 0.6);
+        final dc = b.center - a.center;
+        if ((dc.dx * a.perp.dx + dc.dy * a.perp.dy).abs() > lineTol) {
+          continue; // different roof line (parallel wing)
+        }
+        var bzA = 0.0, bzB = 0.0;
+        for (final t in a.trusses) {
+          bzA += t.bz;
+        }
+        for (final t in b.trusses) {
+          bzB += t.bz;
+        }
+        if ((bzA / a.count - bzB / b.count).abs() > 0.3) continue;
+        // truss-run extents on a's ridge axis — the gap between the
+        // two fragments' nearest trusses decides the join
+        double uOf(Block3d t) => t.x * a.ridge.dx + t.y * a.ridge.dy;
+        var aLo = double.infinity, aHi = -double.infinity;
+        var bLo = double.infinity, bHi = -double.infinity;
+        for (final t in a.trusses) {
+          final u = uOf(t);
+          aLo = math.min(aLo, u);
+          aHi = math.max(aHi, u);
+        }
+        for (final t in b.trusses) {
+          final u = uOf(t);
+          bLo = math.min(bLo, u);
+          bHi = math.max(bHi, u);
+        }
+        final gap = math.max(0.0, math.max(aLo - bHi, bLo - aHi));
+        if (gap > connectTol) continue;
+        final ts = [...a.trusses, ...b.trusses]
+          ..sort((p, q) => uOf(p).compareTo(uOf(q)));
+        var cx = 0.0, cy = 0.0;
+        for (final t in ts) {
+          cx += t.x;
+          cy += t.y;
+        }
+        final cent = Offset(cx / ts.length, cy / ts.length);
+        final cu = cent.dx * a.ridge.dx + cent.dy * a.ridge.dy;
+        out[i] = RoofField(
+          ridge: a.ridge,
+          perp: a.perp,
+          center: cent,
+          u0: uOf(ts.first) - cu - 0.5,
+          u1: uOf(ts.last) - cu + 0.5,
+          half: math.max(a.half, b.half),
+          rise: math.max(a.rise, b.rise),
+          count: ts.length,
+          trusses: ts,
+        );
+        out.removeAt(j);
+        go = true;
+        break outer;
+      }
+    }
   }
   return out;
 }
@@ -3558,9 +4136,10 @@ const double _purlinVisT = 0.012;
 
 /// The C-purlin channels in 3D: one continuous run along the ridge at
 /// every row station the roof plan draws — ridge, interior rows at
-/// `purlinBays` divisions, and the eave/fascia purlin at the overhang
-/// edge. Opening faces upslope (PH detailing convention), section
-/// keyed on the field's measured/spec truss spacing.
+/// `purlinBays` divisions, and the last row ON the truss chord edge
+/// (the eave line — steel ends where the trusses end; only the roof
+/// SHEET overhangs). Opening faces upslope (PH detailing convention),
+/// section keyed on the field's measured/spec truss spacing.
 /// Each run is returned as its own face GROUP for the painter's sort.
 List<List<Face3>> purlinRuns(Model3d m) {
   final s = m.roof;
@@ -3581,6 +4160,54 @@ List<List<Face3>> purlinRuns(Model3d m) {
     final r3 = [f.ridge.dx, f.ridge.dy, 0.0];
     final sl = f.slope;
     final bays = f.purlinBays(s);
+    // runs end AT the gable trusses — the field's ±0.5 extension is
+    // roof-SHEET overhang, not steel: purlins poking past the last
+    // truss were the "hanging" channels in the screenshots. A lone
+    // truss keeps its ±0.5 stub so the channels don't collapse to a
+    // zero-length dot
+    final pu0 = f.count > 1 ? f.u0 + 0.5 : f.u0;
+    final pu1 = f.count > 1 ? f.u1 - 0.5 : f.u1;
+    // each row rides the TOP SURFACE of every chord it crosses — the
+    // tallest member chord sets the straight channel's height (purlins
+    // can't dip between differing trusses). The underside runs along
+    // the roof normal n3, so the required LIFT is the member's
+    // half-thickness projected through n3 — (chordHalf + plateT/2) *
+    // sl/half vertically. A flat +0.05 vertical bump only credits
+    // 0.05*half/sl ALONG n3 and leaves the channel ~1cm INSIDE the
+    // chord on any real slope — the "purlins bore through the
+    // rafters" screenshot.
+    double topAt(double o) {
+      var z = -double.infinity;
+      for (final tb in f.trusses) {
+        final d = cadBlock(tb.def);
+        if (d == null) continue;
+        final th = d.w * tb.sx * tb.scale / 2;
+        final tr = d.height * tb.sz * tb.scale;
+        // the truss's OWN span coordinate for this field station — a
+        // truss offset off the field's ridge line reads its chord at
+        // the wrong o otherwise, floating the whole run above the
+        // chords (the screenshot gap)
+        final tp = Offset(math.cos(tb.rot), math.sin(tb.rot));
+        final oT =
+            (f.center.dx + f.perp.dx * o - tb.x) * tp.dx +
+            (f.center.dy + f.perp.dy * o - tb.y) * tp.dy;
+        // mono-pitch frames rise heel->peak on ONE slope (zlo at the
+        // low heel); fink/king-posts peak at the center
+        final zc = tb.def == 'truss-dbl'
+            ? tb.bz + tr * 0.18 + tr * 0.82 * (oT + th) / (2 * th)
+            : tb.bz + tr * (1 - oT.abs() / th);
+        // centerline -> top surface: half the chord member thickness
+        // (fink/dbl 0.10 -> 0.05, single 0.08 -> 0.04) plus half the
+        // channel's own plate gauge, projected through n3
+        final zt =
+            zc + ((tb.def == 'truss-sgl' ? 0.04 : 0.05) + t / 2) * sl / f.half;
+        if (zt > z) z = zt;
+      }
+      return z.isFinite
+          ? z
+          : bz + f.rise * (1 - o.abs() / f.half) + (0.05 + t / 2) * sl / f.half;
+    }
+
     for (final sgn in [1.0, -1.0]) {
       // upslope (toward ridge) and outward-normal unit vectors in the
       // perp-z plane for this slope
@@ -3594,15 +4221,22 @@ List<List<Face3>> purlinRuns(Model3d m) {
         sgn * f.perp.dy * f.rise / sl,
         f.half / sl,
       ];
-      // stations: interior rows divide the half-span; the eave purlin
-      // sits at the overhang edge; the ridge row is drawn once (+slope)
+      // stations: the ridge carries a PAIR flanking the apex — half
+      // a bay below it each side, leaving room for the ridge cap (a
+      // channel dead ON o=0 reads as one purlin straddling the peak).
+      // Interior rows divide the half-span; the LAST row sits ON the
+      // truss chord edge (the eave line) — a purlin at half+overhang
+      // hangs past the chord end on nothing. The sheet edge still
+      // overhangs (roof plan/elev draw it); steel doesn't.
       final offs = <double>[
-        if (sgn > 0) 0.0,
+        sgn * f.half / (2 * bays),
         for (var j = 1; j < bays; j++) sgn * f.half * j / bays,
-        sgn * (f.half + s.overhang),
+        sgn * f.half,
       ];
       for (final o in offs) {
-        final zTop = bz + f.rise * (1 - o.abs() / f.half) + 0.05;
+        // +8mm so the channel underside kisses the chord's top surface
+        // without z-fighting it — surfaces that share a plane flicker
+        final zTop = topAt(o) + 0.008;
         // station point on the roof surface; the channel's bottom
         // flange underside starts there, centered on the row line
         final base = [
@@ -3616,7 +4250,19 @@ List<List<Face3>> purlinRuns(Model3d m) {
           base[2] - u3[2] * flange / 2 - n3[2] * t / 2,
         ];
         out.add(
-          _purlinChannel(origin, u3, n3, r3, f.u0, f.u1, depth, flange, lip, t, argb),
+          _purlinChannel(
+            origin,
+            u3,
+            n3,
+            r3,
+            pu0,
+            pu1,
+            depth,
+            flange,
+            lip,
+            t,
+            argb,
+          ),
         );
       }
     }
@@ -3643,6 +4289,8 @@ List<List<Offset>> _roofFraming(
     out.add(f.lineAt(0)); // ridge
     for (final sgn in [1.0, -1.0]) {
       out.add(f.lineAt(sgn * (f.half + oh))); // eave
+      // ridge-pair row — same half-bay offset the 3D purlins use
+      out.add(f.lineAt(sgn * f.half / (2 * bays)));
       for (var j = 1; j < bays; j++) {
         out.add(f.lineAt(sgn * f.half * j / bays)); // C-purlin row
       }
@@ -3989,14 +4637,35 @@ _elevScene(Model3d m, SheetView view) {
     if (u1 - u0 < 0.3) continue;
     final z0 = b.bz, zr = b.bz + rise;
     final uc = (u0 + u1) / 2;
-    out.add(([Offset(u0, z0), Offset(uc, zr)], 8));
-    out.add(([Offset(uc, zr), Offset(u1, z0)], 8));
+    // 'truss-dbl' is mono-pitch: the chord rises heel->high end along
+    // the block's +X axis — uLo/uHi keep the slope direction honest
+    // whichever way the block is rotated
+    final mono = def.id == 'truss-dbl';
+    final uLo = uOf(e1.dx, e1.dy), uHi = uOf(e2.dx, e2.dy);
+    final zLo = z0 + rise * 0.18;
+    if (mono) {
+      out.add(([Offset(uLo, zLo), Offset(uHi, zr)], 8));
+      out.add(([Offset(uLo, z0), Offset(uLo, zLo)], 8));
+      out.add(([Offset(uHi, z0), Offset(uHi, zr)], 8));
+    } else {
+      out.add(([Offset(u0, z0), Offset(uc, zr)], 8));
+      out.add(([Offset(uc, zr), Offset(u1, z0)], 8));
+    }
     out.add(([Offset(u0, z0), Offset(u1, z0)], 8));
-    final n = (b.panels < 2 ? 4 : b.panels).clamp(2, 12);
-    for (var i = 1; i < n; i++) {
-      final ux = u0 + (u1 - u0) * i / n;
-      final zt = zr - (ux - uc).abs() / (u1 - uc) * rise;
-      out.add(([Offset(ux, z0), Offset(ux, zt)], 8));
+    // the same fink-family W zigzag the mesh builds: stub top_i->bot_i
+    // + diagonal bot_i->top_{i+1} — fractions along the span map to
+    // the u axis; zTop follows the mono slope or the gable triangle
+    final n = trussPanelCount(b, def);
+    final (_, tops, bots) = finkNodes(n, span);
+    double zTopOf(double x) => mono
+        ? zLo + (zr - zLo) * ((x + span / 2) / span)
+        : zr - (x / (span / 2)).abs() * rise;
+    double uOfX(double x) =>
+        uLo + (uHi - uLo) * ((x + span / 2) / span);
+    for (var i = 0; i < bots.length; i++) {
+      final ub = uOfX(bots[i]);
+      out.add(([Offset(uOfX(tops[i]), zTopOf(tops[i])), Offset(ub, z0)], 8));
+      out.add(([Offset(ub, z0), Offset(uOfX(tops[i + 1]), zTopOf(tops[i + 1]))], 8));
     }
   }
   // THE ROOF ITSELF — each field projects its real roof band onto
@@ -4034,8 +4703,10 @@ _elevScene(Model3d m, SheetView view) {
         out.add(([pt(sgn, hf + oh, band), pt(sgn, 0, band)], 7));
         out.add(([pt(sgn, hf + oh, 0), pt(sgn, 0, 0)], 8));
         out.add(([pt(sgn, hf + oh, 0), pt(sgn, hf + oh, band)], 8));
-        for (var j = 1; j < bays; j++) {
-          final o = hf * j / bays;
+        for (var j = 0; j < bays; j++) {
+          // j=0 is the ridge-pair row flanking the apex (half a bay
+          // out); the rest divide the half-span to the eave line
+          final o = j == 0 ? hf / (2 * bays) : hf * j / bays;
           out.add(([pt(sgn, o, 0), pt(sgn, o, band)], 8));
         }
       }
@@ -4164,10 +4835,54 @@ void _text(
   double h,
   String s, {
   int aci = 8,
+  double rot = 0,
 }) {
   b.write(
-    '0\nTEXT\n8\nLABELS\n62\n$aci\n10\n${_num(x)}\n20\n${_num(y)}\n40\n${_num(h)}\n1\n$s\n',
+    '0\nTEXT\n8\nLABELS\n62\n$aci\n10\n${_num(x)}\n20\n${_num(y)}\n40\n${_num(h)}\n1\n$s\n'
+    '${rot != 0 ? '50\n${_num(rot)}\n' : ''}',
   );
+}
+
+/// AABB collision tracker for sheet annotation. Every emitted text
+/// claims its sheet-space box; movable labels (block tags, footing
+/// callouts) must clear all claimed boxes before drawing, so text
+/// never lands on text. Fixed ink (dimensions, room labels) claims
+/// first, movable labels negotiate around it.
+class _SheetLabels {
+  final boxes = <(double, double, double, double)>[];
+
+  /// Approximate rendered box of a left-anchored text: the simplex
+  /// advance is ~0.6·h per char; a touch of side bearing + descender
+  /// keeps neighbours honest.
+  static (double, double, double, double) box(
+    double x,
+    double y,
+    double h,
+    String s,
+  ) => (x - h * 0.08, y - h * 0.30, x + s.length * h * 0.62 + h * 0.08, y + h * 1.1);
+
+  bool hits((double, double, double, double) b) => boxes.any(
+    (q) => b.$1 < q.$3 && b.$3 > q.$1 && b.$2 < q.$4 && b.$4 > q.$2,
+  );
+
+  /// Emit a text through [buf] AND claim its box.
+  void text(
+    StringBuffer buf,
+    double x,
+    double y,
+    double h,
+    String s, {
+    int aci = 8,
+    double rot = 0,
+  }) {
+    _text(buf, x, y, h, s, aci: aci, rot: rot);
+    boxes.add(box(x, y, h, s));
+  }
+
+  /// Claim a box without emitting (e.g. the caller draws via _text
+  /// itself — register the same footprint).
+  void claim(double x, double y, double h, String s) =>
+      boxes.add(box(x, y, h, s));
 }
 
 List<Offset> _shift(List<Offset> poly, double dx, double dy) => [
@@ -4268,8 +4983,9 @@ void _dimString(
   (double, double, double, double, double) bb,
   double ox,
   double oy,
-  double th,
-) {
+  double th, {
+  _SheetLabels? labels,
+}) {
   final xAxis = side < 2;
   final ords = wallOrds(m, side);
   final vert = !xAxis;
@@ -4306,18 +5022,15 @@ void _dimString(
     final a = ords[i], b = ords[i + 1];
     if (b - a < 0.10) continue;
     final mid = pt((a + b) / 2, d1 + sign * th * 0.4);
-    _text(
-      buf,
-      mid.dx,
-      mid.dy,
-      th * (single ? 0.6 : 0.5),
-      _dim2(b - a),
-      aci: single ? 7 : 8,
-    );
+    final fs = th * (single ? 0.6 : 0.5), s = _dim2(b - a);
+    _text(buf, mid.dx, mid.dy, fs, s, aci: single ? 7 : 8);
+    labels?.claim(mid.dx, mid.dy, fs, s);
   }
   if (!single) {
     final midAll = pt((o0 + o1) / 2, d2 + sign * th * 0.4);
-    _text(buf, midAll.dx, midAll.dy, th * 0.6, _dim2(o1 - o0), aci: 7);
+    final s = _dim2(o1 - o0);
+    _text(buf, midAll.dx, midAll.dy, th * 0.6, s, aci: 7);
+    labels?.claim(midAll.dx, midAll.dy, th * 0.6, s);
   }
 }
 
@@ -4330,8 +5043,9 @@ void _diagStrings(
   (double, double, double, double, double) bb,
   double ox,
   double oy,
-  double th,
-) {
+  double th, {
+  _SheetLabels? labels,
+}) {
   for (final w in m.walls) {
     var cx = 0.0, cy = 0.0;
     final np = w.pts.length ~/ 2;
@@ -4386,21 +5100,110 @@ void _diagStrings(
         final g = ords[k + 1] - ords[k];
         if (g < 0.10) continue;
         final p = at((ords[k] + ords[k + 1]) / 2, d1 + th * 0.4);
-        _text(
-          buf,
-          p.dx,
-          p.dy,
-          th * (single ? 0.6 : 0.5),
-          _dim2(g),
-          aci: single ? 7 : 8,
-        );
+        final fs = th * (single ? 0.6 : 0.5), s = _dim2(g);
+        _text(buf, p.dx, p.dy, fs, s, aci: single ? 7 : 8);
+        labels?.claim(p.dx, p.dy, fs, s);
       }
       if (!single) {
         final p = at((ords.first + ords.last) / 2, d2 + th * 0.4);
-        _text(buf, p.dx, p.dy, th * 0.6, _dim2(ords.last - ords.first), aci: 7);
+        final s = _dim2(ords.last - ords.first);
+        _text(buf, p.dx, p.dy, th * 0.6, s, aci: 7);
+        labels?.claim(p.dx, p.dy, th * 0.6, s);
       }
     }
   }
+}
+
+/// WIDTH + HEIGHT dimension strings on one hosted elevation opening —
+/// the same grammar as [_dimString] (extension lines off the jamb
+/// edges, a dim line with 45° ticks, the metric value on the line).
+/// Width parks BELOW a raised sill or ABOVE a grade-level head; the
+/// height string rides whichever side of the opening has more room.
+/// [ox]/[oy] are the sheet-space shift, [all] the sibling openings
+/// used for the side pick.
+void _openingDims(
+  StringBuffer buf,
+  HostedOpening o,
+  double ox,
+  double oy,
+  double th,
+  List<HostedOpening> all,
+) {
+  final tk = th * 0.28;
+  final raised = o.zl - o.b.bz >= 0.05;
+  // --- horizontal WIDTH string
+  final zDim = raised ? o.zl - th * 2.9 : o.zh + th * 1.7;
+  final zObj = raised ? o.zl : o.zh;
+  final out = raised ? -1.0 : 1.0; // ext-line direction, away from body
+  for (final ux in [o.u0, o.u1]) {
+    _poly(
+      buf,
+      [
+        Offset(ux + ox, zObj + out * 0.05 + oy),
+        Offset(ux + ox, zDim + out * th * 0.15 + oy),
+      ],
+      aci: 9,
+      open: true,
+    );
+    final p = Offset(ux + ox, zDim + oy);
+    _poly(buf, [p + Offset(-tk, -tk), p + Offset(tk, tk)],
+        aci: 8, open: true);
+  }
+  _poly(
+    buf,
+    [Offset(o.u0 + ox, zDim + oy), Offset(o.u1 + ox, zDim + oy)],
+    aci: 9,
+    open: true,
+  );
+  final ws = _dim2(o.u1 - o.u0);
+  _text(
+    buf,
+    (o.u0 + o.u1) / 2 + ox - ws.length * th * 0.45 * 0.3,
+    zDim + out * th * 0.15 + oy,
+    th * 0.45,
+    ws,
+  );
+
+  // --- vertical HEIGHT string on the roomier side
+  var rightGap = double.infinity, leftGap = double.infinity;
+  for (final q in all) {
+    if (q.bi == o.bi) continue;
+    if (q.u0 >= o.u1 - 1e-6) rightGap = math.min(rightGap, q.u0 - o.u1);
+    if (q.u1 <= o.u0 + 1e-6) leftGap = math.min(leftGap, o.u0 - q.u1);
+  }
+  final left = rightGap < th * 2.4 && leftGap > rightGap;
+  final s = left ? -1.0 : 1.0;
+  final uEdge = left ? o.u0 : o.u1;
+  final uDim = uEdge + s * th * 1.5;
+  for (final z in [o.zl, o.zh]) {
+    _poly(
+      buf,
+      [
+        Offset(uEdge + s * 0.05 + ox, z + oy),
+        Offset(uDim + s * th * 0.15 + ox, z + oy),
+      ],
+      aci: 9,
+      open: true,
+    );
+    final p = Offset(uDim + ox, z + oy);
+    _poly(buf, [p + Offset(-tk, -tk), p + Offset(tk, tk)],
+        aci: 8, open: true);
+  }
+  _poly(
+    buf,
+    [Offset(uDim + ox, o.zl + oy), Offset(uDim + ox, o.zh + oy)],
+    aci: 9,
+    open: true,
+  );
+  final hs = _dim2(o.zh - o.zl);
+  _text(
+    buf,
+    uDim + s * th * 0.5 + ox,
+    (o.zl + o.zh) / 2 + oy - hs.length * th * 0.45 * 0.3,
+    th * 0.45,
+    hs,
+    rot: 90,
+  );
 }
 
 /// FOUNDATION plan: thin wall outlines, every footing pad at REAL
@@ -4420,10 +5223,28 @@ void _structuralSheet(
       _poly(buf, _shift(w.segPoly(i), ox, oy), aci: 9);
     }
   }
+  // the dim strings claim their text boxes BEFORE the F#/FP# labels
+  // negotiate — pads at the bound edge used to have their callouts
+  // clipped under the exterior dim ink
+  final labels = _SheetLabels();
+  final we = wallEnv(m);
+  final dbb = (
+    we?.$1 ?? bb.$1,
+    we?.$2 ?? bb.$2,
+    we?.$3 ?? bb.$3,
+    we?.$4 ?? bb.$4,
+    bb.$5,
+  );
+  for (var s = 0; s < 4; s++) {
+    _dimString(buf, m, s, dbb, ox, oy, th, labels: labels);
+  }
+  _diagStrings(buf, m, bb, ox, oy, th, labels: labels);
   final cols = [
     for (final b in m.blocks)
       if (b.def == 'col-sq' || b.def == 'col-rd') b,
   ];
+  // (text, quad half-extents, centre) — callouts negotiate here
+  final pending = <(String, double, double, Offset)>[];
   for (var i = 0; i < cols.length; i++) {
     final b = cols[i];
     final def = cadBlock(b.def)!;
@@ -4458,14 +5279,12 @@ void _structuralSheet(
       _poly(buf, sq, aci: 7);
       _poly(buf, [sq[0], sq[2]], aci: 9, open: true);
       _poly(buf, [sq[1], sq[3]], aci: 9, open: true);
-      _text(
-        buf,
-        c.dx - hw,
-        c.dy - hw - th * 0.9,
-        th * 0.5,
-        'F${i + 1}  ${_num(f.w)}x${_num(f.w)}x${_num(f.t)} @${_num(footingDepth(b.footD))}M',
-        aci: 8,
-      );
+      pending.add((
+        'F${i + 1}  ${_num(f.w)}x${_num(f.w)}x${_num(f.t)} @${_num(blockFootingDepth(m, b))}M',
+        hw,
+        hw,
+        c,
+      ));
     }
   }
   var np = 0;
@@ -4483,27 +5302,51 @@ void _structuralSheet(
     _poly(buf, sq, aci: 7);
     _poly(buf, [sq[0], sq[2]], aci: 9, open: true);
     _poly(buf, [sq[1], sq[3]], aci: 9, open: true);
-    _text(
-      buf,
-      c.dx - w,
-      c.dy - d - th * 0.9,
-      th * 0.5,
+    pending.add((
       'FP${++np}  ${_num(w * 2)}x${_num(d * 2)}x${_num(def.height * b.sz * b.scale)}',
-      aci: 8,
-    );
+      w,
+      d,
+      c,
+    ));
   }
-  final we = wallEnv(m);
-  final dbb = (
-    we?.$1 ?? bb.$1,
-    we?.$2 ?? bb.$2,
-    we?.$3 ?? bb.$3,
-    we?.$4 ?? bb.$4,
-    bb.$5,
-  );
-  for (var s = 0; s < 4; s++) {
-    _dimString(buf, m, s, dbb, ox, oy, th);
+  // callout placement: centred under the pad (the old corner anchor
+  // ran into the east dim strings), then above / right / left /
+  // shifted; nothing overlaps claimed ink
+  final fs = th * 0.5;
+  for (final (s, hw, hd, c) in pending) {
+    final w = s.length * fs * 0.62;
+    final cs = <(double, double)>[];
+    final step = w * 0.6 + th * 0.4;
+    for (final sh in [0.0, step, -step]) {
+      cs.add((c.dx + sh, c.dy - hd - th * 0.4 - fs * 1.05));
+    }
+    for (final sh in [0.0, step, -step]) {
+      cs.add((c.dx + sh, c.dy + hd + th * 0.4 + fs * 0.3));
+    }
+    cs.add((c.dx + hw + th * 0.4 + w / 2, c.dy - fs * 0.4));
+    cs.add((c.dx - hw - th * 0.4 - w / 2, c.dy - fs * 0.4));
+    var drawn = false;
+    for (final p in cs) {
+      final b = (
+        p.$1 - w / 2 - fs * 0.1,
+        p.$2 - fs * 0.32,
+        p.$1 + w / 2 + fs * 0.1,
+        p.$2 + fs * 1.12,
+      );
+      if (labels.hits(b)) continue;
+      _text(buf, p.$1 - s.length * fs * 0.31, p.$2, fs, s, aci: 8);
+      labels.boxes.add(b);
+      drawn = true;
+      break;
+    }
+    if (!drawn) {
+      // hopeless — drop to the bare tag centred inside the pad so
+      // the pad still carries its F#/FP# mark
+      final tag = s.split(' ').first;
+      _text(buf, c.dx - tag.length * fs * 0.31, c.dy - fs * 0.4, fs, tag,
+          aci: 8);
+    }
   }
-  _diagStrings(buf, m, bb, ox, oy, th);
 }
 
 /// Framing NOTES for the roof-framing sheet — member sizes, spacing
@@ -4673,20 +5516,36 @@ void _fixtureSheet(
     }
   }
   final want = view == SheetView.electrical ? kElectricalDefs : kPlumbingDefs;
+  // fixture labels negotiate against each other — a run of
+  // receptacles along one wall stacked to unreadable before
+  final labels = _SheetLabels();
   for (final b in m.blocks) {
     final def = cadBlock(b.def);
     if (def == null || !want.contains(b.def)) continue;
     for (final l in blockLines(b, def)) {
       _poly(buf, _shift(l, ox, oy), aci: 8, open: true);
     }
-    _text(
-      buf,
-      b.x + ox - def.name.length * th * 0.12,
-      b.y + oy - def.d * b.sy * b.scale / 2 - th * 0.8,
-      th * 0.45,
-      def.name.toUpperCase(),
-      aci: 8,
-    );
+    final s = def.name.toUpperCase();
+    final fs = th * 0.45, w = s.length * fs * 0.62;
+    final hd = def.d * b.sy * b.scale / 2;
+    final cs = <(double, double)>[
+      (b.x, b.y - hd - th * 0.4 - fs * 1.05), // below
+      (b.x, b.y + hd + th * 0.4 + fs * 0.3), // above
+      (b.x + w * 0.6, b.y - hd - th * 0.4 - fs * 1.05), // shifted
+      (b.x - w * 0.6, b.y - hd - th * 0.4 - fs * 1.05),
+    ];
+    for (final p in cs) {
+      final bx = (
+        ox + p.$1 - w / 2 - fs * 0.1,
+        oy + p.$2 - fs * 0.32,
+        ox + p.$1 + w / 2 + fs * 0.1,
+        oy + p.$2 + fs * 1.12,
+      );
+      if (labels.hits(bx)) continue;
+      _text(buf, ox + p.$1 - s.length * fs * 0.31, oy + p.$2, fs, s, aci: 8);
+      labels.boxes.add(bx);
+      break;
+    }
   }
 }
 
@@ -4721,6 +5580,9 @@ String _sheetContent(Model3d m, SheetView view) {
   );
 
   if (view == SheetView.plan) {
+    // every emitted text claims a sheet-space box so the movable
+    // block labels can negotiate free spots — no text-on-text ink
+    final labels = _SheetLabels();
     for (final wl in m.walls) {
       for (var i = 0; i < wl.segs; i++) {
         // the same joined/opening-carved pieces the plan canvas
@@ -4753,12 +5615,19 @@ String _sheetContent(Model3d m, SheetView view) {
           final mid = (a + bpt) / 2;
           final dir = (bpt - a) / len;
           final off = Offset(-dir.dy, dir.dx) * (wl.thickness / 2 + th * 0.4);
+          final s = '${_dim2(len)} m';
           _text(
             buf,
             mid.dx + ox + off.dx - th * 0.3,
             mid.dy + oy + off.dy,
             th * 0.55,
-            '${_dim2(len)} m',
+            s,
+          );
+          labels.claim(
+            mid.dx + ox + off.dx - th * 0.3,
+            mid.dy + oy + off.dy,
+            th * 0.55,
+            s,
           );
         }
       }
@@ -4783,9 +5652,16 @@ String _sheetContent(Model3d m, SheetView view) {
         _poly(buf, _shift(l, ox, oy), aci: 8, open: true);
       }
     }
-    // interior dimension ticks hugging each footprint + name/WxD
-    // labels under every block — the same annotation set the 2D
-    // plan canvas paints when the dims toggle is on
+    // exterior dimension strings + diagonal strings FIRST — they are
+    // the outermost fixed ink; opening/block dims negotiate around
+    // them, so their text boxes must be claimed before anything else
+    // that could sit in the same corridor
+    for (var s = 0; s < 4; s++) {
+      _dimString(buf, m, s, dbb, ox, oy, th, labels: labels);
+    }
+    _diagStrings(buf, m, bb, ox, oy, th, labels: labels);
+    // interior dimension ticks hugging each footprint — the dim
+    // LINES stay anchored, only their VALUES negotiate clear slots
     if (m.blocks.length <= 80) {
       final ccx = (bb.$1 + bb.$3) / 2, ccy = (bb.$2 + bb.$4) / 2;
       void dimEdge(Offset a, Offset b, Offset c0, double off) {
@@ -4815,18 +5691,25 @@ String _sheetContent(Model3d m, SheetView view) {
         }
         final lm = (a2 + b2) / 2 + n * th * 0.55;
         final s = _dim2(len);
-        _text(
-          buf,
-          lm.dx + ox - s.length * th * 0.45 * 0.3,
-          lm.dy + oy,
-          th * 0.45,
-          s,
-          aci: 8,
-        );
+        final fs = th * 0.45;
+        // the dim LINE hugs the footprint; the VALUE negotiates a
+        // clear slot — opening width dims used to land on the
+        // exterior strings and neighbouring blocks' dims
+        for (final p in [
+          lm,
+          lm + u * (s.length * fs * 0.62 + th * 0.3),
+          lm - u * (s.length * fs * 0.62 + th * 0.3),
+          lm + n * th * 0.9,
+        ]) {
+          final lx = p.dx + ox - s.length * fs * 0.3;
+          final ly = p.dy + oy;
+          if (labels.hits(_SheetLabels.box(lx, ly, fs, s))) continue;
+          _text(buf, lx, ly, fs, s, aci: 8);
+          labels.claim(lx, ly, fs, s);
+          break;
+        }
       }
 
-      final placed = <Offset>[];
-      final tags = blockTags(m);
       for (var bi = 0; bi < m.blocks.length; bi++) {
         final bl = m.blocks[bi];
         final def = cadBlock(bl.def);
@@ -4839,54 +5722,8 @@ String _sheetContent(Model3d m, SheetView view) {
           dimEdge(fp[0], fp[1], Offset(bl.x, bl.y), 0.14);
           dimEdge(fp[1], fp[2], Offset(bl.x, bl.y), 0.14);
         }
-        // name + footprint dims anchored just under the quad's
-        // bottom edge; clashes with an emitted label are dropped
-        var cx = 0.0, bot = double.infinity;
-        for (final p in fp) {
-          cx += p.dx;
-          bot = math.min(bot, p.dy);
-        }
-        final at = Offset(cx / fp.length, bot - th * 0.8);
-        var clash = false;
-        for (final q in placed) {
-          if ((q - at).distance < th * 1.6) {
-            clash = true;
-            break;
-          }
-        }
-        if (clash) continue;
-        placed.add(at);
-        final bw = def.w * bl.scale * bl.sx;
-        final bd = def.d * bl.scale * bl.sy;
-        final s2 = '${_dim2(bw)} × ${_dim2(bd)}';
-        // openings carry the D#/W# schedule tag the elevations match
-        final label = tags[bi] != null
-            ? '${tags[bi]} · ${def.name}'
-            : def.name;
-        _text(
-          buf,
-          at.dx + ox - label.length * th * 0.5 * 0.3,
-          at.dy + oy,
-          th * 0.5,
-          label,
-          aci: 8,
-        );
-        _text(
-          buf,
-          at.dx + ox - s2.length * th * 0.45 * 0.3,
-          at.dy + oy - th * 0.75,
-          th * 0.45,
-          s2,
-          aci: 8,
-        );
       }
     }
-    // exterior dimension strings on all four sides — same ordinates
-    // the 2D plan paints, so the generated sheet matches it
-    for (var s = 0; s < 4; s++) {
-      _dimString(buf, m, s, dbb, ox, oy, th);
-    }
-    _diagStrings(buf, m, bb, ox, oy, th);
     // manual DIM-tool annotations — only ones anchored near the
     // model: a stray mark left far off-plan (stale edit) would
     // stretch the sheet bounds and shrink the drawing to a speck
@@ -4907,10 +5744,135 @@ String _sheetContent(Model3d m, SheetView view) {
         _poly(buf, [a - n, a + n], aci: 8, open: true);
         _poly(buf, [b - n, b + n], aci: 8, open: true);
         final mid = (a + b) / 2 + n * 0.6;
-        _text(buf, mid.dx, mid.dy, th * 0.5, _dim2(dir.distance), aci: 8);
+        final s = _dim2(dir.distance);
+        _text(buf, mid.dx, mid.dy, th * 0.5, s, aci: 8);
+        labels.claim(mid.dx, mid.dy, th * 0.5, s);
       }
     }
-    _roomLabels(buf, m, ox, oy, th);
+    _roomLabels(buf, m, ox, oy, th, labels: labels);
+    // movable block labels — LAST, so every fixed text (dim strings,
+    // opening width dims, room names) is already claimed. Openings
+    // park OUTSIDE their wall (away from the wall-envelope centre)
+    // where a plan reader expects the D#/W# tag; solids try below
+    // → above → shifted → flanks. A candidate whose box hits claimed
+    // ink is skipped; a block that can't place its full tag drops
+    // the W×D line first, then the label entirely (never overlaps).
+    if (m.blocks.length <= 80) {
+      // envelope centre decides which side of a wall opening is
+      // "out" — the model bound can be skewed by furniture/trees
+      final ecx = (dbb.$1 + dbb.$3) / 2, ecy = (dbb.$2 + dbb.$4) / 2;
+      final tags = blockTags(m);
+      const gap = 0.35;
+      for (var bi = 0; bi < m.blocks.length; bi++) {
+        final bl = m.blocks[bi];
+        final def = cadBlock(bl.def);
+        if (def == null) continue;
+        final fp = blockFootprint(bl, def);
+        if (fp.length < 4) continue;
+        var qx0 = double.infinity, qy0 = double.infinity;
+        var qx1 = -double.infinity, qy1 = -double.infinity;
+        for (final p in fp) {
+          qx0 = math.min(qx0, p.dx);
+          qy0 = math.min(qy0, p.dy);
+          qx1 = math.max(qx1, p.dx);
+          qy1 = math.max(qy1, p.dy);
+        }
+        final qcx = (qx0 + qx1) / 2, qcy = (qy0 + qy1) / 2;
+        final qw = qx1 - qx0, qh = qy1 - qy0;
+        // openings carry the D#/W# schedule tag the elevations
+        // match — the name already carries the size and dimEdge
+        // draws the width on the wall, so no W×D line (one line
+        // of ink where three collided before)
+        final l1 = tags[bi] != null ? '${tags[bi]} · ${def.name}' : def.name;
+        final s2 =
+            '${_dim2(def.w * bl.scale * bl.sx)} × ${_dim2(def.d * bl.scale * bl.sy)}';
+        final fs1 = th * 0.5, fs2 = th * 0.45, pitch = th * 0.75;
+        final w1 = l1.length * fs1 * 0.62;
+        final w2 = s2.length * fs2 * 0.62;
+
+        // (cx, yBot) candidates in MODEL coords: yBot = baseline of
+        // the lowest line; the 2-line block stacks up by pitch.
+        // The claimed boxes are SHEET coords — shift before testing.
+        bool tryCands(List<(double, double)> cs, bool two) {
+          final w = two ? math.max(w1, w2) : w1;
+          for (final c in cs) {
+            final b = (
+              ox + c.$1 - w / 2 - fs1 * 0.1,
+              oy + c.$2 - fs2 * 0.32,
+              ox + c.$1 + w / 2 + fs1 * 0.1,
+              oy + c.$2 + (two ? pitch : 0) + fs1 * 1.12,
+            );
+            if (labels.hits(b)) continue;
+            // draw lowest line first, both centred on cx
+            var y = c.$2;
+            if (two) {
+              final x = ox + c.$1 - s2.length * fs2 * 0.31;
+              _text(buf, x, oy + y, fs2, s2, aci: 8);
+              y += pitch;
+            }
+            final x = ox + c.$1 - l1.length * fs1 * 0.31;
+            _text(buf, x, oy + y, fs1, l1, aci: 8);
+            labels.boxes.add(b);
+            return true;
+          }
+          return false;
+        }
+
+        List<(double, double)> cands(bool two) {
+          final w = two ? math.max(w1, w2) : w1;
+          final bh = (two ? pitch : 0.0) + fs1; // block height est
+          final step = w * 0.6 + th * 0.4; // along-run shift step
+          final cs = <(double, double)>[];
+          if (def.opening) {
+            // dominant outward axis from the envelope centre
+            final dx = qcx - ecx, dy = qcy - ecy;
+            if (dx.abs() >= dy.abs()) {
+              final sgn = dx < 0 ? -1.0 : 1.0;
+              for (final cl in [th * 0.4, th * 1.0, th * 1.6]) {
+                for (final dcy in [0.0, qh / 2 + fs1, -(qh / 2 + fs1)]) {
+                  cs.add(
+                      (qcx + sgn * (qw / 2 + cl + w / 2), qcy + dcy - bh / 2));
+                }
+              }
+              // inner side last resort
+              cs.add((qcx - sgn * (qw / 2 + th + w / 2), qcy - bh / 2));
+            } else {
+              final sgn = dy < 0 ? -1.0 : 1.0;
+              for (final cl in [th * 0.4, th * 1.0, th * 1.6]) {
+                for (final sh in [0.0, step, -step]) {
+                  if (sgn > 0) {
+                    cs.add((qcx + sh, qy1 + cl + fs1 * 0.32));
+                  } else {
+                    cs.add((qcx + sh, qy0 - cl - bh));
+                  }
+                }
+              }
+              // inner side last resort
+              cs.add(
+                sgn > 0
+                    ? (qcx, qy0 - th - bh)
+                    : (qcx, qy1 + th + fs1 * 0.32),
+              );
+            }
+          } else {
+            for (final sh in [0.0, step, -step]) {
+              cs.add((qcx + sh, qy0 - gap * th - bh)); // below
+            }
+            for (final sh in [0.0, step, -step]) {
+              cs.add((qcx + sh, qy1 + gap * th + fs2 * 0.3)); // above
+            }
+            cs.add((qx1 + gap * th + w / 2, qcy - bh / 2)); // right
+            cs.add((qx0 - gap * th - w / 2, qcy - bh / 2)); // left
+          }
+          return cs;
+        }
+
+        // solids keep their W×D second line when it fits anywhere;
+        // drop the size line before dropping the tag entirely
+        if (!def.opening && tryCands(cands(true), true)) continue;
+        tryCands(cands(false), false);
+      }
+    }
   } else if (view == SheetView.structural) {
     _structuralSheet(buf, m, bb, ox, oy, th);
   } else if (view == SheetView.roofFrame) {
@@ -4968,22 +5930,18 @@ String _sheetContent(Model3d m, SheetView view) {
     }
     // door/window callouts on every drawn opening — the same D#/W#
     // tags the floor plan uses: doors sit on grade so they tag ABOVE
-    // the head; raised openings stack tag + size + sill underneath
+    // the head; raised openings stack tag + sill underneath. The W/H
+    // numbers moved onto real dimension strings (_openingDims).
     final tags = blockTags(m);
     for (final o in es.hosted) {
       final tag = tags[o.bi];
       if (tag == null) continue;
       final uc = (o.u0 + o.u1) / 2 + ox;
-      final size = '${_dim2(o.u1 - o.u0)} × ${_dim2(o.zh - o.zl)}';
       final lines = o.zl - o.b.bz < 0.05
-          ? [
-              (o.zh + th * 0.45, tag),
-              (o.zh + th * 1.25, size),
-            ]
+          ? [(o.zh + th * 0.45, tag)]
           : [
               (o.zl - th * 0.7, tag),
-              (o.zl - th * 1.5, size),
-              (o.zl - th * 2.3, 'SILL ${_dim2(o.zl - o.b.bz)}'),
+              (o.zl - th * 1.5, 'SILL ${_dim2(o.zl - o.b.bz)}'),
             ];
       for (final (tz, s) in lines) {
         _text(
@@ -4995,6 +5953,7 @@ String _sheetContent(Model3d m, SheetView view) {
           aci: 8,
         );
       }
+      _openingDims(buf, o, ox, oy, th, es.hosted);
     }
   } else {
     for (final p in polys) {
@@ -5165,6 +6124,7 @@ String buildModelSheet(
         math.max(tx.height * k, 1.5),
         tx.text,
         aci: aciFromArgb(tx.color),
+        rot: tx.rotation,
       );
     }
     _paperFurniture(buf, view, fx0, fy0, fx1, fy1, scaleDenom, m, project);
@@ -5285,11 +6245,11 @@ void _paperFurniture(
     _text(buf, cx0 + 2, by0 + 2.8, 1.9, s.position.toUpperCase(), aci: 8);
   }
   // ---- drawing title centered above the strip + sheet meta ----
-  ctext(fx0 + dw / 2, by1 + 8.5, 7.5, kSheetTitle[view]!);
+  ctext(fx0 + dw / 2, by1 + 9.4, 7.5, kSheetTitle[view]!);
   final tw = kSheetTitle[view]!.length * 7.5 * 0.56;
   _poly(buf, [
-    Offset(fx0 + dw / 2 - tw / 2, by1 + 7.6),
-    Offset(fx0 + dw / 2 + tw / 2, by1 + 7.6),
+    Offset(fx0 + dw / 2 - tw / 2, by1 + 8.5),
+    Offset(fx0 + dw / 2 + tw / 2, by1 + 8.5),
   ], open: true);
   ctext(fx0 + dw / 2, by1 + 4.2, 2.2, 'MODEL: ${m.name.toUpperCase()}', aci: 8);
   _text(
@@ -5374,7 +6334,14 @@ List<String> _wrap2(String s, int at) {
 }
 
 /// plan CONTENT (sheet furniture lives in the paper template).
-void _roomLabels(StringBuffer buf, Model3d m, double ox, double oy, double th) {
+void _roomLabels(
+  StringBuffer buf,
+  Model3d m,
+  double ox,
+  double oy,
+  double th, {
+  _SheetLabels? labels,
+}) {
   for (final v in m.volumes) {
     final c = v.center;
     final nm = v.name.toUpperCase();
@@ -5386,6 +6353,8 @@ void _roomLabels(StringBuffer buf, Model3d m, double ox, double oy, double th) {
       nm,
       aci: 7,
     );
+    labels?.claim(c.dx + ox - nm.length * th * 0.17, c.dy + oy + th * 0.2,
+        th * 0.6, nm);
     final ar = '${_num(v.area)} SQ.M';
     _text(
       buf,
@@ -5395,6 +6364,8 @@ void _roomLabels(StringBuffer buf, Model3d m, double ox, double oy, double th) {
       ar,
       aci: 8,
     );
+    labels?.claim(c.dx + ox - ar.length * th * 0.13, c.dy + oy - th * 0.6,
+        th * 0.45, ar);
   }
 }
 

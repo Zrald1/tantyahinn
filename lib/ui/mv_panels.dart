@@ -168,6 +168,7 @@ extension _MvPanels on _ModelViewState {
                             onTap: () => setState(() {
                               _sel = m;
                               _undo.clear();
+                              _redo.clear();
                               _vol = null;
                               _wallSel = null;
                               _blkSel = null;
@@ -998,6 +999,7 @@ extension _MvPanels on _ModelViewState {
         ('Ctrl+X', 'cut selected'),
         ('Ctrl+V', 'paste at pointer'),
         ('Ctrl+Z', 'undo'),
+        ('Ctrl+R / Y', 'redo'),
         ('? / F1', 'this card'),
       ],
     ),

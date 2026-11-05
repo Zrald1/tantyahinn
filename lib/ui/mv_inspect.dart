@@ -191,7 +191,11 @@ extension _MvInspect on _ModelViewState {
           ),
           child: _blockMeshThumb(
             b,
-            b.opening ? _BlockView.front : _BlockView.iso,
+            // openings AND trusses are profile objects — the /\ web
+            // layout is unreadable squashed into an iso wedge
+            b.opening || isTrussDef(b.id)
+                ? _BlockView.front
+                : _BlockView.iso,
             w: 64,
             h: 48,
           ),
@@ -223,11 +227,13 @@ extension _MvInspect on _ModelViewState {
     ),
     child: Row(
       children: [
-        // openings read clearest head-on (FRONT); furniture isos.
-        // _blockMeshThumb clips + repaint-boundaries itself
+        // openings + trusses read clearest head-on (FRONT); furniture
+        // isos. _blockMeshThumb clips + repaint-boundaries itself
         _blockMeshThumb(
           b,
-          b.opening ? _BlockView.front : _BlockView.iso,
+          b.opening || isTrussDef(b.id)
+              ? _BlockView.front
+              : _BlockView.iso,
           w: 52,
           h: 40,
         ),
@@ -349,6 +355,7 @@ extension _MvInspect on _ModelViewState {
         onChanged: (s) {
           final x = double.tryParse(s);
           if (x != null && (ok == null || ok(x))) {
+            _pushUndoTick('$id-$label');
             setState(() => set(x));
             est.update();
           }
@@ -398,6 +405,7 @@ extension _MvInspect on _ModelViewState {
         ],
         onChanged: (v) {
           if (v != null) {
+            _pushUndo();
             setState(() => set(v));
             est.update();
           }
@@ -414,6 +422,7 @@ extension _MvInspect on _ModelViewState {
     final span = def.w * seed.sx * seed.scale;
     final rd = Offset(-math.sin(seed.rot), math.cos(seed.rot));
     var placed = 0;
+    _pushUndo(); // the whole array is ONE undo step
     setState(() {
       for (final sgn in [1.0, -1.0]) {
         for (var k = 1; k <= 24; k++) {
@@ -424,7 +433,11 @@ extension _MvInspect on _ModelViewState {
             continue;
           }
           final seat = seatTrussOnWalls(m, c, seed.rot, span);
-          if (seat == null || (seat.$2 - seed.rot).abs() > 0.35) break;
+          // cos-compare: truss orientation is modulo pi — a seat
+          // returned at seed.rot+pi is the SAME truss, not a flip
+          if (seat == null || math.cos(seat.$2 - seed.rot).abs() < 0.94) {
+            break;
+          }
           m.blocks.add(
             Block3d(
               def: seed.def,
@@ -432,7 +445,10 @@ extension _MvInspect on _ModelViewState {
               y: seat.$1.dy,
               rot: seat.$2,
               scale: seed.scale,
-              sx: seed.sx,
+              // out-to-out: fit each bay's span to its bearing pair
+              sx: seat.$4 > 0
+                  ? trussFitSx(seed.scale, def.w, seat.$4)
+                  : seed.sx,
               sy: seed.sy,
               sz: seed.sz,
               bz: seat.$3,
@@ -484,6 +500,7 @@ extension _MvInspect on _ModelViewState {
       for (final c in colors)
         InkWell(
           onTap: () => setState(() {
+            if (cur != c) _pushUndo();
             pick(c);
             est.update();
           }),
@@ -521,6 +538,7 @@ extension _MvInspect on _ModelViewState {
             child: Switch(
               value: value,
               onChanged: (v) {
+                _pushUndo();
                 setState(() => set(v));
                 est.update();
               },
@@ -557,6 +575,7 @@ extension _MvInspect on _ModelViewState {
         style: const TextStyle(fontSize: 12.5),
         decoration: const InputDecoration(labelText: 'Name', isDense: true),
         onChanged: (s) {
+          _pushUndoTick('$id-pn');
           w.name = s;
           est.update();
         },
@@ -608,6 +627,7 @@ extension _MvInspect on _ModelViewState {
         style: const TextStyle(fontSize: 12.5),
         decoration: const InputDecoration(labelText: 'Name', isDense: true),
         onChanged: (s) {
+          _pushUndoTick('$id-pn');
           v.name = s;
           est.update();
         },
@@ -711,6 +731,7 @@ extension _MvInspect on _ModelViewState {
               padding: const EdgeInsets.symmetric(horizontal: 6),
             ),
             onPressed: () {
+              _pushUndo();
               setState(() {
                 b.sx = b.sy = b.sz = 1;
                 b.bz = 0;
@@ -753,19 +774,67 @@ extension _MvInspect on _ModelViewState {
             ),
             _pf(
               b.id,
-              'Depth (m, 0=0.60)',
+              'Depth (m, 0=auto)',
               b.footD,
               (x) => b.footD = x,
               ok: (x) => x >= 0,
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 4, 14, 0),
+            child: Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                const Text(
+                  'NSCP 305-1',
+                  style: TextStyle(fontSize: 10, color: Color(0xFF64748B)),
+                ),
+                for (final e in [
+                  ('AUTO', 0.0),
+                  ('1F·0.30', 0.30),
+                  ('2F·0.45', 0.45),
+                  ('3F·0.60', 0.60),
+                ])
+                  InkWell(
+                    onTap: () {
+                      if (b.footD == e.$2) return;
+                      _pushUndo();
+                      setState(() => b.footD = e.$2);
+                      est.update();
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 7, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: (e.$2 == 0 ? b.footD == 0 : b.footD == e.$2)
+                            ? cs.primaryContainer
+                            : cs.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(9),
+                        border: Border.all(
+                          color: (e.$2 == 0 ? b.footD == 0 : b.footD == e.$2)
+                              ? cs.primary
+                              : Colors.black26,
+                        ),
+                      ),
+                      child: Text(
+                        e.$1,
+                        style: const TextStyle(fontSize: 10),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
           Builder(
             builder: (_) {
+              final m = _sel!;
               final f = footingFor(def!.w * b.sx * b.scale, b.footW);
               return _pair(
                 _pRead(
                   'Footing',
-                  '${f.w.toStringAsFixed(1)}×${f.w.toStringAsFixed(1)}×${f.t.toStringAsFixed(2)} @${footingDepth(b.footD).toStringAsFixed(2)}m',
+                  '${f.w.toStringAsFixed(1)}×${f.w.toStringAsFixed(1)}×${f.t.toStringAsFixed(2)} @${blockFootingDepth(m, b).toStringAsFixed(2)}m',
                 ),
                 _pRead(
                   'Rebar',
@@ -793,6 +862,7 @@ extension _MvInspect on _ModelViewState {
                   // (upper columns of a stack never carry pads)
                   final m = _sel;
                   if (m == null) return;
+                  _pushUndo(); // mass footing pass = one undo step
                   setState(() {
                     for (final q in m.blocks) {
                       if (q.def != 'col-sq' && q.def != 'col-rd') {
@@ -824,11 +894,11 @@ extension _MvInspect on _ModelViewState {
       ],
       if (isTrussDef(b.def)) ...[
         _pHead(cs, 'TRUSS'),
-        if (b.def == 'truss')
+        if (b.def == 'truss' || b.def == 'truss-dbl')
           _pair(
             _pf(
               b.id,
-              'Web bays (0=auto 4)',
+              'Web bays (0=auto→${trussPanelCount(b, cadBlock(b.def)!)})',
               b.panels.toDouble(),
               (x) => b.panels = x.round(),
               ok: (x) => x == 0 || (x >= 2 && x <= 12),
@@ -988,11 +1058,15 @@ extension _MvInspect on _ModelViewState {
                   ignore: b,
                 );
                 if (seat == null) return;
+                _pushUndo();
                 setState(() {
                   b.x = seat.$1.dx;
                   b.y = seat.$1.dy;
                   b.rot = seat.$2;
                   b.bz = seat.$3;
+                  if (seat.$4 > 0) {
+                    b.sx = trussFitSx(b.scale, def.w, seat.$4);
+                  }
                 });
                 est.update();
               },
@@ -1054,6 +1128,72 @@ extension _MvInspect on _ModelViewState {
                         Expanded(
                           child: Text(
                             'Below the 0.60 m standard embedment',
+                            style: TextStyle(
+                              fontSize: 10.5,
+                              color: cs.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            );
+          },
+        ),
+      ],
+      if (isBeamDef(b.def)) ...[
+        _pHead(cs, 'BEAM (NSCP 2015 §409.3.1.1)'),
+        Builder(
+          builder: (_) {
+            final len = def!.w * b.sx * b.scale;
+            final wd = def.d * b.sy * b.scale;
+            final dp = def.height * b.sz * b.scale;
+            // simply-supported L/16 — the no-calc deflection floor
+            final hMin = nscpBeamDepth(len);
+            final s = beamSched(wd, dp, len);
+            return Column(
+              children: [
+                _pair(
+                  _pf(
+                    b.id,
+                    'Width b (m)',
+                    wd,
+                    (x) => b.sy = x / (def.d * b.scale),
+                    ok: (x) => x >= 0.15,
+                  ),
+                  _pf(
+                    b.id,
+                    'Depth h (m)',
+                    dp,
+                    (x) => b.sz = x / (def.height * b.scale),
+                    ok: (x) => x >= 0.15,
+                  ),
+                ),
+                _pair(
+                  _pRead(
+                    'Min depth L/16',
+                    '${hMin.toStringAsFixed(2)} m (span ${len.toStringAsFixed(1)} m)',
+                  ),
+                  _pRead(
+                    'Rebar',
+                    '${s.main.label} + 10mm st @${(s.tieSpacing * 100).round()}cm',
+                  ),
+                ),
+                if (dp < hMin - 1e-3)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 2, 14, 4),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.warning_amber,
+                          size: 14,
+                          color: Colors.orange,
+                        ),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(
+                            'Below the NSCP L/16 deflection minimum',
                             style: TextStyle(
                               fontSize: 10.5,
                               color: cs.onSurfaceVariant,
@@ -1289,6 +1429,7 @@ extension _MvInspect on _ModelViewState {
         initialValue: m.name,
         decoration: const InputDecoration(labelText: 'Name', isDense: true),
         onChanged: (s) {
+          _pushUndoTick('mn-${m.id}');
           m.name = s;
           est.update();
         },
@@ -1332,6 +1473,7 @@ extension _MvInspect on _ModelViewState {
         initialValue: v.name,
         decoration: const InputDecoration(labelText: 'Name', isDense: true),
         onChanged: (s) {
+          _pushUndoTick('vn-${v.id}');
           v.name = s;
           est.update();
         },
@@ -1348,6 +1490,7 @@ extension _MvInspect on _ModelViewState {
           for (final c in _palette)
             InkWell(
               onTap: () {
+                if (v.argb != c) _pushUndo();
                 v.argb = c;
                 est.update();
                 setState(() {});
@@ -1420,6 +1563,7 @@ extension _MvInspect on _ModelViewState {
       onChanged: (s) {
         final x = double.tryParse(s);
         if (x != null) {
+          _pushUndoTick('${v.id}-$label');
           set(x);
           est.update();
         }
@@ -1444,6 +1588,7 @@ extension _MvInspect on _ModelViewState {
         initialValue: w.name,
         decoration: const InputDecoration(labelText: 'Name', isDense: true),
         onChanged: (s) {
+          _pushUndoTick('wn-${w.id}');
           w.name = s;
           est.update();
         },
@@ -1463,6 +1608,7 @@ extension _MvInspect on _ModelViewState {
         onChanged: (s) {
           final x = double.tryParse(s);
           if (x != null && x > 0) {
+            _pushUndoTick('${w.id}-t');
             setState(() => w.thickness = x);
             est.update();
           }
@@ -1480,6 +1626,7 @@ extension _MvInspect on _ModelViewState {
         onChanged: (s) {
           final x = double.tryParse(s);
           if (x != null && x > 0) {
+            _pushUndoTick('${w.id}-h');
             setState(() => w.height = x);
             est.update();
           }
@@ -1494,6 +1641,7 @@ extension _MvInspect on _ModelViewState {
         onChanged: (s) {
           final x = double.tryParse(s);
           if (x != null) {
+            _pushUndoTick('${w.id}-b');
             setState(() => w.base = x);
             est.update();
           }
@@ -1508,6 +1656,7 @@ extension _MvInspect on _ModelViewState {
           for (final c in _palette)
             InkWell(
               onTap: () {
+                if (w.argb != c) _pushUndo();
                 w.argb = c;
                 est.update();
                 setState(() {});
@@ -1557,6 +1706,7 @@ extension _MvInspect on _ModelViewState {
       onChanged: (s) {
         final x = double.tryParse(s);
         if (x != null) {
+          _pushUndoTick('${b.id}-$label');
           setState(() => set(x));
           est.update();
         }
@@ -1591,6 +1741,7 @@ extension _MvInspect on _ModelViewState {
         onChanged: (s) {
           final x = double.tryParse(s);
           if (x != null) {
+            _pushUndoTick('${b.id}-rot');
             setState(() {
               b.rot = x * math.pi / 180;
               _blkRot = b.rot;
@@ -1608,6 +1759,7 @@ extension _MvInspect on _ModelViewState {
         onChanged: (s) {
           final x = double.tryParse(s);
           if (x != null && x > 0) {
+            _pushUndoTick('${b.id}-sc');
             setState(() => b.scale = x);
             est.update();
           }
@@ -1651,6 +1803,7 @@ extension _MvInspect on _ModelViewState {
               padding: const EdgeInsets.symmetric(horizontal: 6),
             ),
             onPressed: () {
+              _pushUndo();
               setState(() {
                 b.sx = b.sy = b.sz = 1;
                 b.bz = 0;

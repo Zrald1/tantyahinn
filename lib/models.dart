@@ -111,9 +111,9 @@ class DocTemplate {
               .toList() ??
           [],
     );
-    // a stored deped template still carrying the retired office names
-    // gets them blanked (labels/positions keep the user's structure)
-    if (t.id == 'deped') _normalizeSignatories(t.signatories);
+    // retired office names are blanked under EVERY stored template —
+    // only deped gets its canonical seats back
+    _normalizeSignatories(t.signatories, insertSeats: t.id == 'deped');
     return t;
   }
 }
@@ -173,7 +173,8 @@ List<Signatory> _depedSeats() => [
 
 /// The retired office signatories — stored projects/templates still
 /// carrying these names have them blanked (the labels and office
-/// titles stay; the person is whoever sits in the seat now).
+/// titles stay; the person is whoever sits in the seat now). Applies
+/// to EVERY template, not just deped: these names must never export.
 const _retiredSignatoryNames = {
   'VIRGILIO B. BANCASO',
   'JONATHAN D. NARVATO',
@@ -181,17 +182,23 @@ const _retiredSignatoryNames = {
   'NORMA B. SAMANTELA, CESO V',
 };
 
-/// Normalize [sigs] to the current sign-off: the retired office names
-/// are blanked (labels and office titles survive — the person is
-/// whoever sits in the seat now) and the old default preparer becomes
-/// 'GERALD BUSTILLA / Civil Engineer'. Missing canonical seats are
-/// re-inserted in order (stale files saved with fewer rows, hand-edited
-/// json); user-reordered seats and extra custom rows are left alone.
-/// Returns true when anything changed.
-bool _normalizeSignatories(List<Signatory> sigs) {
+/// Case/spacing-insensitive form for signatory-name matching —
+/// ' virgilio  b.  bancaso ' still matches the retired list.
+String _canonName(String n) =>
+    n.toUpperCase().replaceAll(RegExp(r'\s+'), ' ').trim();
+
+/// Normalize [sigs]: the retired office names are blanked (labels and
+/// office titles survive — the person is whoever sits in the seat
+/// now) and the old default preparer becomes 'GERALD BUSTILLA /
+/// Civil Engineer'. With [insertSeats] the missing canonical DepEd
+/// seats are re-inserted in order (stale files saved with fewer rows,
+/// hand-edited json); custom/private templates keep their own seat
+/// layout — only the name scrub applies to them. Returns true when
+/// anything changed.
+bool _normalizeSignatories(List<Signatory> sigs, {bool insertSeats = true}) {
   var hit = false;
   for (final s in sigs) {
-    final n = s.name.toUpperCase();
+    final n = _canonName(s.name);
     if (_retiredSignatoryNames.contains(n)) {
       s.name = '';
       hit = true;
@@ -203,6 +210,7 @@ bool _normalizeSignatories(List<Signatory> sigs) {
       hit = true;
     }
   }
+  if (!insertSeats) return hit;
   var insertAt = 0; // the canonical seats lead the block
   for (final seat in _depedSeats()) {
     final i = sigs.indexWhere((s) => s.label == seat.label);
@@ -263,10 +271,11 @@ class ProjectInfo {
   bool showLetterhead;
   bool showSignatories;
 
-  /// Theme colors (ARGB ints) — accent drives the app theme, the navy
-  /// table header, the grand-total bar and the export's navy rule;
+  /// Theme colors (ARGB ints) — accent drives the app theme, the
+  /// table header, the grand-total bar and the export's accent rule;
   /// the band colors paint section headers, group/location labels,
-  /// subtotal rows and the ordinary summary rows.
+  /// subtotal rows and the ordinary summary rows. Defaults are the
+  /// Tantyahin brand palette: pink accent + violet section bands.
   int themeColor;
   int sectionColor;
   int groupColor;
@@ -291,11 +300,11 @@ class ProjectInfo {
     this.template = 'deped',
     this.showLetterhead = true,
     this.showSignatories = true,
-    this.themeColor = 0xFF1E4976,
-    this.sectionColor = 0xFFDBE4F0,
-    this.groupColor = 0xFFF1F5F9,
-    this.subtotalColor = 0xFFEAF1F8,
-    this.summaryColor = 0xFFF1F5F9,
+    this.themeColor = 0xFFD5008F, // brand pink accent
+    this.sectionColor = 0xFF7C3AED, // violet section bands
+    this.groupColor = 0xFFF5F3FF,
+    this.subtotalColor = 0xFFF3E8FF,
+    this.summaryColor = 0xFFFCE7F3,
   }) : letterhead = letterhead ?? defaultLetterhead.toList(),
        date = date ?? DateTime.now(),
        signatories = signatories ?? _depedSeats();
@@ -355,11 +364,11 @@ class ProjectInfo {
           ? j['showLetterhead'] == true
           : j['template'] != 'private',
       showSignatories: j['showSignatories'] ?? true,
-      themeColor: j['themeColor'] ?? 0xFF1E4976,
-      sectionColor: j['sectionColor'] ?? 0xFFDBE4F0,
-      groupColor: j['groupColor'] ?? 0xFFF1F5F9,
-      subtotalColor: j['subtotalColor'] ?? 0xFFEAF1F8,
-      summaryColor: j['summaryColor'] ?? 0xFFF1F5F9,
+      themeColor: j['themeColor'] ?? 0xFFD5008F,
+      sectionColor: j['sectionColor'] ?? 0xFF7C3AED,
+      groupColor: j['groupColor'] ?? 0xFFF5F3FF,
+      subtotalColor: j['subtotalColor'] ?? 0xFFF3E8FF,
+      summaryColor: j['summaryColor'] ?? 0xFFFCE7F3,
     );
     // migrate legacy fixed-field projects — the stock structure:
     // Gerald prepares, the other seats carry titles with blank names
@@ -398,10 +407,14 @@ class ProjectInfo {
             Signatory(label: s.label, name: s.name, position: s.position),
         ]);
     }
-    // Retired office names are blanked in deped projects (labels and
-    // titles stay — the seats exist, the names are empty); custom
+    // Retired office names are blanked under EVERY template (labels
+    // and titles stay — the seats exist, the names are empty); only
+    // deped projects get the canonical seats re-inserted. Custom
     // signatories the user typed keep their names.
-    if (p.template == 'deped') _normalizeSignatories(p.signatories);
+    _normalizeSignatories(
+      p.signatories,
+      insertSeats: p.template == 'deped',
+    );
     return p;
   }
 

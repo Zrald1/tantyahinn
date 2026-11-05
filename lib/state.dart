@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:uuid/uuid.dart';
 
 import 'cpm.dart';
 import 'design_calc.dart';
@@ -296,6 +297,21 @@ class EstimateState extends ChangeNotifier {
 
   void removeLine(BoqSection s, BoqLine line) {
     s.lines.remove(line);
+    notifyListeners();
+  }
+
+  /// Commit sections parsed by [BoqImport] — append to the live BOQ or
+  /// replace it wholesale (the preview dialog collects the choice).
+  /// New uuids are reassigned so ids can't collide with existing rows.
+  void importBoq(List<BoqSection> imported, {required bool replace}) {
+    if (replace) sections.clear();
+    for (final s in imported) {
+      s.id = const Uuid().v4();
+      for (final l in s.lines) {
+        l.id = const Uuid().v4();
+      }
+      sections.add(s);
+    }
     notifyListeners();
   }
 

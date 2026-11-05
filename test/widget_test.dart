@@ -1225,6 +1225,133 @@ void main() {
     est.models.clear();
   });
 
+  testWidgets('3D MODEL undo/redo: Ctrl+Z reverts, Ctrl+R + Ctrl+Y redo', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1600, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    est.modelIntroDismissed = true;
+    await tester.pumpWidget(const BoqApp());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('3D MODEL'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('New model'));
+    await tester.pumpAndSettle();
+    final m = est.models.first;
+    final st = tester.state(find.byType(ModelView)) as dynamic;
+    final planTL = tester.getTopLeft(find.byKey(const Key('modelPlan')));
+    Offset w2s(double x, double y) =>
+        planTL +
+        Offset(
+          (st.planOffset as Offset).dx + x * (st.planScale as double),
+          (st.planOffset as Offset).dy - y * (st.planScale as double),
+        );
+
+    // grab canvas focus with a middle press, then B + tap places a block
+    final g0 = await tester.startGesture(
+      w2s(6.0, -2.0),
+      kind: PointerDeviceKind.mouse,
+      buttons: kMiddleMouseButton,
+    );
+    await g0.up();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyB);
+    await tester.pumpAndSettle();
+    await tester.tapAt(w2s(6.0, -2.0));
+    await tester.pumpAndSettle();
+    expect(m.blocks.length, 1);
+
+    Future<void> ctrl(LogicalKeyboardKey k) async {
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(k);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pumpAndSettle();
+    }
+
+    // Ctrl+Z removes the placement…
+    await ctrl(LogicalKeyboardKey.keyZ);
+    expect(m.blocks, isEmpty);
+    // …Ctrl+R brings it back (redo stack caught the live state)…
+    await ctrl(LogicalKeyboardKey.keyR);
+    expect(m.blocks.length, 1);
+    // …Ctrl+Z + Ctrl+Y round-trips the same way…
+    await ctrl(LogicalKeyboardKey.keyZ);
+    expect(m.blocks, isEmpty);
+    await ctrl(LogicalKeyboardKey.keyY);
+    expect(m.blocks.length, 1);
+    // …and Ctrl+Shift+Z is bound too
+    await ctrl(LogicalKeyboardKey.keyZ);
+    expect(m.blocks, isEmpty);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(m.blocks.length, 1);
+
+    // a NEW op after undo clears the redo stack: undo the placement,
+    // place a second block — the first must stay gone
+    await ctrl(LogicalKeyboardKey.keyZ);
+    expect(m.blocks, isEmpty);
+    await tester.tapAt(w2s(8.0, -3.0));
+    await tester.pumpAndSettle();
+    expect(m.blocks.length, 1);
+    await ctrl(LogicalKeyboardKey.keyR);
+    expect(m.blocks.length, 1); // redo had nothing to bring back
+
+    est.models.clear();
+  });
+
+  testWidgets('3D MODEL undo restores roof spec + dims, not just parts', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1600, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    est.modelIntroDismissed = true;
+    await tester.pumpWidget(const BoqApp());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('3D MODEL'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('New model'));
+    await tester.pumpAndSettle();
+    final m = est.models.first;
+    final st = tester.state(find.byType(ModelView)) as dynamic;
+    final planTL = tester.getTopLeft(find.byKey(const Key('modelPlan')));
+    Offset w2s(double x, double y) =>
+        planTL +
+        Offset(
+          (st.planOffset as Offset).dx + x * (st.planScale as double),
+          (st.planOffset as Offset).dy - y * (st.planScale as double),
+        );
+    // grab canvas key focus so the shortcut bindings see the key event
+    final g0 = await tester.startGesture(
+      w2s(6.0, -2.0),
+      kind: PointerDeviceKind.mouse,
+      buttons: kMiddleMouseButton,
+    );
+    await g0.up();
+    await tester.pump();
+
+    // mutate roof spec + name directly (what the inspector fields do),
+    // with an undo push between — then undo must restore BOTH, not just
+    // the part lists
+    final oldSpacing = m.roof.trussSpacing;
+    st.pushUndoForTest();
+    m.roof.trussSpacing = 0.9;
+    m.name = 'renamed';
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(m.roof.trussSpacing, closeTo(oldSpacing, 1e-9));
+    expect(m.name, isNot('renamed'));
+
+    est.models.clear();
+  });
+
   testWidgets('3D MODEL long-press: carry a block, wheel rotates, drop lands', (
     tester,
   ) async {
@@ -2018,7 +2145,11 @@ void main() {
     await tester.tap(find.text('Column 0.3□'));
     await tester.pumpAndSettle();
     expect(find.text('STRUCTURE (NSCP 2015)'), findsOneWidget);
-    expect(find.text('Depth (m, 0=0.60)'), findsOneWidget);
+    expect(find.text('Depth (m, 0=auto)'), findsOneWidget);
+    // NSCP 305-1 preset chips sit beside the depth field
+    expect(find.text('1F·0.30'), findsOneWidget);
+    expect(find.text('2F·0.45'), findsOneWidget);
+    expect(find.text('3F·0.60'), findsOneWidget);
 
     est.models.clear();
   });
@@ -2118,6 +2249,8 @@ void main() {
     await tester.tap(find.text('Props'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Column 0.3□').first);
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Apply footing to all columns'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Apply footing to all columns'));
     await tester.pumpAndSettle();
@@ -2323,8 +2456,8 @@ void main() {
     expect(est.sections.single.title, 'KEEP ME NOT');
   });
 
-  testWidgets('export menu offers xlsx/pdf/docx; chip opens project '
-      'details; pdf+docx builders produce real files', (tester) async {
+  testWidgets('export menu offers xlsx/pdf/docx; pdf+docx builders '
+      'produce real files', (tester) async {
     tester.view.physicalSize = const Size(1600, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -2341,15 +2474,6 @@ void main() {
     expect(find.text('PDF document (.pdf)'), findsOneWidget);
     expect(find.text('Word document (.docx)'), findsOneWidget);
     await tester.tapAt(const Offset(10, 450)); // dismiss menu
-    await tester.pumpAndSettle();
-
-    // the Project Details button is gone — its dialog now opens from
-    // the project chip
-    expect(find.text('Project Details'), findsNothing);
-    await tester.tap(find.byTooltip('Project details'));
-    await tester.pumpAndSettle();
-    expect(find.text('Project Details'), findsOneWidget); // dialog
-    await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
   });
 
